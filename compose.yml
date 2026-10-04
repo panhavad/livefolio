@@ -1,3 +1,5 @@
+name: livefolio
+
 services:
   livefolio:
     build:
@@ -5,13 +7,11 @@ services:
       dockerfile: Dockerfile
       args:
         APP_VERSION: ${APP_VERSION:-}
-    image: ${LIVEFOLIO_IMAGE:-livefolio:local}
+    image: livefolio:local
     container_name: livefolio
     restart: unless-stopped
     ports:
       - "${LIVEFOLIO_PORT:-8080}:80"
-    labels:
-      com.centurylinklabs.watchtower.enable: "${AUTO_UPDATE:-false}"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
       interval: 30s
@@ -19,19 +19,15 @@ services:
       retries: 3
       start_period: 5s
 
-  watchtower:
-    # containrrr/watchtower is archived and cannot talk to Docker Engine 29+.
-    image: nickfedor/watchtower:1.22.3
-    container_name: livefolio-watchtower
+  # Pulls the checked-out branch and rebuilds/restarts livefolio when it changes.
+  updater:
+    build: ./deploy/updater
+    image: livefolio-updater:local
+    container_name: livefolio-updater
     restart: unless-stopped
     profiles: ["auto-update"]
     environment:
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_POLL_INTERVAL: "${UPDATE_INTERVAL_SECONDS:-300}"
-      WATCHTOWER_ROLLING_RESTART: "true"
-      WATCHTOWER_INCLUDE_RESTARTING: "true"
-      REPO_USER: "${GHCR_USERNAME:-}"
-      REPO_PASS: "${GHCR_TOKEN:-}"
+      UPDATE_INTERVAL_SECONDS: "${UPDATE_INTERVAL_SECONDS:-60}"
     volumes:
+      - ./:/repo
       - /var/run/docker.sock:/var/run/docker.sock

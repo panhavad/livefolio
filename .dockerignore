@@ -7,3 +7,4 @@ dist
 Dockerfile*
 compose*.yml
 README.md
+deploy

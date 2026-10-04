@@ -42,8 +42,9 @@ it by hand:
 - set `APP_VERSION` to override it. The GitHub Actions workflow does this
   automatically and also tags each published image with the version.
 
-When you run `docker compose up --build` from local source, the build cannot
-see `.git`. It falls back to `YYYY.MM.DD-local` unless you pass the version in:
+The auto-update profile sets `APP_VERSION` for you. When you run
+`docker compose up --build` yourself, the build cannot see `.git`. It falls
+back to `YYYY.MM.DD-local` unless you pass the version in:
 
 ```bash
 APP_VERSION="$(git log -1 --format=%cd --date=format:%Y.%m.%d)-$(git rev-parse --short=7 HEAD)" docker compose up -d --build
@@ -66,47 +67,37 @@ and Docker checks `/health` to confirm the service is healthy.
 
 ## Automatic updates after a Git push
 
-How it works:
+There is nothing to configure. On the server, from the cloned repository, run:
 
-1. You push to `master` (or `main`).
-2. The [publish workflow](.github/workflows/publish-image.yml) builds the app
-   and publishes `ghcr.io/panhavad/livefolio:latest` (plus a commit-SHA tag)
-   for `linux/amd64` and `linux/arm64`.
-3. [Watchtower](https://github.com/nicholas-fedor/watchtower) on the server
-   polls the registry, pulls the new image, restarts the app container, and
-   removes the old image.
+```bash
+docker compose --profile auto-update up -d --build --remove-orphans
+```
 
-On the deployment server:
+That starts the app plus a small `livefolio-updater` container. Every minute,
+the updater:
 
-1. Copy `.env.example` to `.env` and set:
+1. Fetches the branch the server checkout is on (normally `master`/`main`).
+2. Fast-forwards the checkout when there are new commits.
+3. Rebuilds and restarts the app with `docker compose up -d --build livefolio`,
+   stamping it with the new version, then removes the old image.
 
-   ```dotenv
-   LIVEFOLIO_IMAGE=ghcr.io/panhavad/livefolio:latest
-   AUTO_UPDATE=true
-   ```
+If a build fails, the previous version keeps running and the updater retries
+on the next check. Changes to the updater script deploy themselves. Changes to
+the `updater` service in `compose.yml` need the command above to be run again.
 
-2. If the GHCR package is private, set `GHCR_USERNAME` and `GHCR_TOKEN` (a
-   personal access token with `read:packages`) for Watchtower, and sign the
-   host in for the first pull:
+Watch it work with `docker logs -f livefolio-updater`. To check more or less
+often, set `UPDATE_INTERVAL_SECONDS` in `.env`.
 
-   ```bash
-   echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-   ```
+Notes:
 
-   Alternatively, make the package public under
-   **GitHub → Packages → livefolio → Package settings**.
+- The updater only fast-forwards. If you commit or edit tracked files directly
+  on the server, it logs `Cannot fast-forward` until you clean up the checkout
+  (for example with `git reset --hard origin/master`).
+- Git runs as the owner of the checkout, so file ownership does not change.
+- Public repositories cloned over SSH are fetched over HTTPS, so no keys are
+  needed.
+- The updater uses the host's Docker socket (`/var/run/docker.sock`) to
+  rebuild the app.
 
-3. Pull the published image, then start the app and the update watcher:
-
-   ```bash
-   docker compose pull livefolio
-   docker compose --profile auto-update up -d --no-build
-   ```
-
-Watchtower checks the registry every five minutes by default. Set
-`UPDATE_INTERVAL_SECONDS` in `.env` to change the polling interval. To confirm
-updates are being detected, run `docker logs -f livefolio-watchtower`.
-
-> Watchtower only updates the `livefolio` container when `AUTO_UPDATE=true`
-> and `LIVEFOLIO_IMAGE` points at the registry image. A locally built
-> `livefolio:local` image is never auto-updated.
+The GitHub Actions workflow still publishes images to GitHub Container Registry
+on every push, but the deployment no longer depends on it.
