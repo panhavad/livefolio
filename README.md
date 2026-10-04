@@ -1,18 +1,20 @@
 # Livefolio
 
-A polished, responsive portfolio builder built with React and Vite.
+A polished, responsive portfolio builder built with React and Vite, with a small
+Node.js server for accounts and storage.
 
 ## Features
 
-- Account registration and login flow
+- Accounts with server-side password checks and secure session cookies
 - Editable public profile and introduction
 - Project cards with automatic website snapshots from submitted URLs
 - Active, inactive, and deprecated project states
 - Shareable public portfolio URLs at `/p/your-name`
 - Eight color themes for the public portfolio page (Midnight, Paper, Ocean, Sky,
-  Forest, Sand, Plum, and Rose), chosen in Settings
+  Forest, Sand, Plum, and Rose), chosen on the studio's Projects page
 - Responsive dashboard and public portfolio
-- Local browser persistence for the prototype
+- Portfolios saved on the server, so they work across devices and public links
+  work for every visitor
 
 ## Run locally
 
@@ -21,11 +23,31 @@ npm install
 npm run dev
 ```
 
+`npm run dev` serves the API too. Local accounts and portfolios are stored in
+`.data/` (ignored by Git).
+
 For a production build:
 
 ```bash
 npm run build
+npm start   # serves dist/ and the API on http://localhost:8080
 ```
+
+## Accounts and data
+
+- Passwords are hashed with scrypt; plain-text passwords are never stored.
+- Logging in sets an `HttpOnly`, `SameSite=Lax` session cookie (`Secure` behind
+  HTTPS). Sessions last 30 days and end on logout.
+- Wrong credentials always get the same `Incorrect email or password.` message,
+  and repeated failures are rate limited.
+- Only the owner can change a portfolio. Visitors can see it only once it is
+  published, and inactive projects stay hidden.
+- Everything is stored in `db.json` inside `DATA_DIR` (`/data` in Docker, kept
+  in the `livefolio-data` volume so it survives redeploys). Back it up with:
+
+  ```bash
+  docker cp livefolio:/data/db.json ./livefolio-backup.json
+  ```
 
 ## Versioning
 
@@ -61,9 +83,10 @@ docker compose up -d --build
 The site is available at `http://localhost:8080`. Change the host port by
 copying `.env.example` to `.env` and setting `LIVEFOLIO_PORT`.
 
-The container uses a multi-stage build and serves the production bundle from
-Nginx. Client-side routes such as `/p/maya-chen` are routed back to the app,
-and Docker checks `/health` to confirm the service is healthy.
+The container uses a multi-stage build. A Node.js server (built-in modules only)
+serves the production bundle and the `/api` routes. Client-side routes such as
+`/p/maya-chen` are routed back to the app, and Docker checks `/health` to
+confirm the service is healthy.
 
 ## Automatic updates after a Git push
 

@@ -59,11 +59,36 @@ const getInitials = (name) =>
 const getScreenFromPath = () => {
   const path = window.location.pathname;
   if (path.startsWith("/p/")) return "portfolio";
-  if (path.startsWith("/studio") && localStorage.getItem("livefolio-auth") === "true") {
-    return "dashboard";
-  }
+  if (path.startsWith("/studio")) return "dashboard";
   return "landing";
 };
+
+const getSlugFromPath = () => {
+  try {
+    return decodeURIComponent(window.location.pathname.slice(3)).replace(/\/+$/, "").toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+async function api(path, { method = "GET", body } = {}) {
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw Object.assign(new Error("Can’t reach Livefolio. Check your connection and try again."), { status: 0 });
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(payload.error || "Something went wrong. Please try again."), { status: response.status });
+  }
+  return payload;
+}
 
 const demoProjects = [
   {
@@ -141,7 +166,8 @@ const pageThemeStyle = (theme) => ({
   "--pf-shadow": theme.shadow,
 });
 
-const defaultData = {
+// The built-in demo portfolio shown at /p/maya-chen ("Explore a portfolio").
+const demoPortfolio = {
   name: "Maya Chen",
   role: "Independent designer & developer",
   intro:
@@ -155,32 +181,72 @@ const defaultData = {
   projects: demoProjects,
 };
 
-function usePersistentState() {
-  const [data, setData] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("livefolio-data"));
-      if (!saved) return defaultData;
-      // Drop the theme saved by the removed Appearance feature.
-      const { theme: _removedTheme, ...rest } = saved;
-      return { ...defaultData, ...rest, projects: rest.projects || defaultData.projects };
-    } catch {
-      return defaultData;
-    }
-  });
+const signedOut = { status: "out", user: null, data: null };
+
+// Session and portfolio data live on the server; edits are saved through the API.
+function useAccount() {
+  const [account, setAccount] = useState({ status: "loading", user: null, data: null });
+  const [saveError, setSaveError] = useState("");
+  const confirmed = useRef(null);
+  const queue = useRef(Promise.resolve());
 
   useEffect(() => {
-    localStorage.setItem("livefolio-data", JSON.stringify(data));
-  }, [data]);
+    // Remove the flag left by the old browser-only prototype login.
+    localStorage.removeItem("livefolio-auth");
+    api("/api/auth/session")
+      .then(({ user, data }) => {
+        confirmed.current = data ?? null;
+        setAccount(user ? { status: "in", user, data } : signedOut);
+      })
+      .catch(() => setAccount(signedOut));
+  }, []);
 
-  return [data, setData];
+  const signIn = ({ user, data }) => {
+    confirmed.current = data;
+    setSaveError("");
+    setAccount({ status: "in", user, data });
+  };
+
+  const signOut = async () => {
+    await api("/api/auth/logout", { method: "POST", body: {} }).catch(() => {});
+    confirmed.current = null;
+    setSaveError("");
+    setAccount(signedOut);
+  };
+
+  // Resolves to an error message, or "" once the server has saved the change.
+  const setData = (next) => {
+    setAccount((current) => ({ ...current, data: next }));
+    setSaveError("");
+    const request = queue.current.then(() => api("/api/portfolio", { method: "PUT", body: { data: next } }));
+    queue.current = request.catch(() => {});
+    return request.then(
+      ({ data }) => {
+        confirmed.current = data;
+        return "";
+      },
+      (error) => {
+        if (error.status === 401) {
+          confirmed.current = null;
+          setAccount(signedOut);
+        } else {
+          setAccount((current) => (current.status === "in" ? { ...current, data: confirmed.current } : current));
+        }
+        setSaveError(error.message);
+        return error.message;
+      },
+    );
+  };
+
+  return { ...account, setData, saveError, clearSaveError: () => setSaveError(""), signIn, signOut };
 }
 
 function App() {
-  const [data, setData] = usePersistentState();
+  const account = useAccount();
+  const { status, data } = account;
+  const authenticated = status === "in";
   const [screen, setScreen] = useState(getScreenFromPath);
-  const [authenticated, setAuthenticated] = useState(
-    () => localStorage.getItem("livefolio-auth") === "true",
-  );
+  const [slug, setSlug] = useState(getSlugFromPath);
   const [authMode, setAuthMode] = useState("signup");
   const [authOpen, setAuthOpen] = useState(false);
 
@@ -189,27 +255,21 @@ function App() {
     setAuthOpen(true);
   };
 
-  const completeAuth = (form) => {
-    if (authMode === "signup") {
-      const name = form.name.trim();
-      setData((current) => ({
-        ...current,
-        name,
-        email: form.email.trim(),
-        slug: slugify(name) || current.slug,
-      }));
-    }
-    localStorage.setItem("livefolio-auth", "true");
-    setAuthenticated(true);
+  const completeAuth = async (mode, form) => {
+    const result = mode === "signup"
+      ? await api("/api/auth/signup", { method: "POST", body: { name: form.name, email: form.email, password: form.password } })
+      : await api("/api/auth/login", { method: "POST", body: { email: form.email, password: form.password } });
+    account.signIn(result);
     setAuthOpen(false);
     window.history.pushState({}, "", "/studio");
     setScreen("dashboard");
   };
 
-  const navigate = (next) => {
+  const navigate = (next, portfolioSlug = data?.slug) => {
     setScreen(next);
     if (next === "portfolio") {
-      window.history.pushState({}, "", `/p/${data.slug}`);
+      setSlug(portfolioSlug);
+      window.history.pushState({}, "", `/p/${portfolioSlug}`);
     } else if (next === "dashboard") {
       window.history.pushState({}, "", "/studio");
     } else {
@@ -219,24 +279,44 @@ function App() {
   };
 
   useEffect(() => {
-    const onPopState = () => setScreen(getScreenFromPath());
+    const onPopState = () => {
+      setScreen(getScreenFromPath());
+      setSlug(getSlugFromPath());
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  // The studio requires a session; send signed-out visitors to the login form.
+  useEffect(() => {
+    if (status === "out" && screen === "dashboard") {
+      window.history.replaceState({}, "", "/");
+      setScreen("landing");
+      openAuth("login");
+    }
+  }, [status, screen]);
+
   if (screen === "portfolio") {
-    return <Portfolio data={data} onBack={() => navigate(authenticated ? "dashboard" : "landing")} />;
+    return (
+      <PortfolioPage
+        slug={slug}
+        ownData={authenticated ? data : null}
+        onBack={() => navigate(authenticated ? "dashboard" : "landing")}
+      />
+    );
   }
 
   if (screen === "dashboard") {
+    if (!authenticated) return <main className="app-loading" aria-busy="true">Loading your studio…</main>;
     return (
       <Dashboard
         data={data}
-        setData={setData}
+        setData={account.setData}
+        saveError={account.saveError}
+        onDismissError={account.clearSaveError}
         onPreview={() => navigate("portfolio")}
-        onLogout={() => {
-          localStorage.removeItem("livefolio-auth");
-          setAuthenticated(false);
+        onLogout={async () => {
+          await account.signOut();
           navigate("landing");
         }}
       />
@@ -247,7 +327,7 @@ function App() {
     <>
       <Landing
         onAuth={openAuth}
-        onExplore={() => navigate("portfolio")}
+        onExplore={() => navigate("portfolio", demoPortfolio.slug)}
         authenticated={authenticated}
         onDashboard={() => navigate("dashboard")}
       />
@@ -385,9 +465,22 @@ function Landing({ onAuth, onExplore, authenticated, onDashboard }) {
 function AuthModal({ mode, setMode, onClose, onComplete }) {
   const [showPassword, setShowPassword] = useState(false);
   const [form, setForm] = useState({ name: "", email: "", password: "" });
-  const submit = (event) => {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
     event.preventDefault();
-    onComplete(form);
+    setPending(true);
+    setError("");
+    try {
+      await onComplete(mode, form);
+    } catch (err) {
+      setError(err.message);
+      setPending(false);
+    }
+  };
+  const switchMode = () => {
+    setError("");
+    setMode(mode === "signup" ? "login" : "signup");
   };
 
   return (
@@ -401,19 +494,20 @@ function AuthModal({ mode, setMode, onClose, onComplete }) {
         </div>
         <form onSubmit={submit}>
           {mode === "signup" && (
-            <label>Your name<input required placeholder="Maya Chen" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+            <label>Your name<input required maxLength={80} autoComplete="name" placeholder="Maya Chen" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
           )}
-          <label>Email address<input required type="email" placeholder="you@example.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
-          <label>Password<div className="password-field"><input required minLength={6} type={showPassword ? "text" : "password"} placeholder="At least 6 characters" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /><button type="button" onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff /> : <Eye />}</button></div></label>
-          <button className="accent-button full" type="submit">{mode === "signup" ? "Create my Livefolio" : "Log in"} <ArrowRight size={18} /></button>
+          <label>Email address<input required type="email" maxLength={254} autoComplete="email" placeholder="you@example.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
+          <label>Password<div className="password-field"><input required minLength={mode === "signup" ? 8 : undefined} maxLength={200} autoComplete={mode === "signup" ? "new-password" : "current-password"} type={showPassword ? "text" : "password"} placeholder={mode === "signup" ? "At least 8 characters" : "Your password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /><button type="button" aria-label={showPassword ? "Hide password" : "Show password"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff /> : <Eye />}</button></div></label>
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          <button className="accent-button full" type="submit" disabled={pending}>{pending ? (mode === "signup" ? "Creating your account…" : "Logging in…") : mode === "signup" ? "Create my Livefolio" : "Log in"} {!pending && <ArrowRight size={18} />}</button>
         </form>
-        <p className="auth-switch">{mode === "signup" ? "Already have a folio?" : "New around here?"} <button onClick={() => setMode(mode === "signup" ? "login" : "signup")}>{mode === "signup" ? "Log in" : "Create an account"}</button></p>
+        <p className="auth-switch">{mode === "signup" ? "Already have a folio?" : "New around here?"} <button type="button" onClick={switchMode}>{mode === "signup" ? "Log in" : "Create an account"}</button></p>
       </div>
     </div>
   );
 }
 
-function Dashboard({ data, setData, onPreview, onLogout }) {
+function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogout }) {
   const [tab, setTab] = useState("projects");
   const [editingId, setEditingId] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -464,12 +558,19 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
         </header>
 
         <div className="dashboard-content">
+          {saveError && (
+            <div className="save-error" role="alert">
+              <span>Couldn’t save your change: {saveError}</span>
+              <button type="button" aria-label="Dismiss" onClick={onDismissError}><X size={16} /></button>
+            </div>
+          )}
           {tab === "projects" && (
             <>
               <div className="dashboard-title">
                 <div><span>YOUR WORK</span><h1>Projects <em>{data.projects.length}</em></h1><p>{activeCount} live projects on your public folio.</p></div>
                 <button className="accent-button" onClick={() => setEditingId("new")} disabled={editingId === "new"}><Plus size={17} /> Add project</button>
               </div>
+              <PageThemePicker value={data.portfolioTheme} onChange={(portfolioTheme) => setData({ ...data, portfolioTheme })} onPreview={onPreview} />
               <div className="project-list">
                 {editingId === "new" && (
                   <ProjectEditor key="new-project" project={null} onClose={() => setEditingId(null)} onSave={saveProject} />
@@ -488,7 +589,7 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
             </>
           )}
           {tab === "profile" && <ProfileEditor data={data} setData={setData} />}
-          {tab === "settings" && <SettingsPanel data={data} setData={setData} onPreview={onPreview} />}
+          {tab === "settings" && <SettingsPanel data={data} setData={setData} />}
         </div>
       </section>
     </main>
@@ -597,9 +698,9 @@ function ProfileEditor({ data, setData }) {
   });
   const [saved, setSaved] = useState(false);
   const update = (field, value) => setForm({ ...form, [field]: value });
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    setData({ ...data, ...form });
+    if (await setData({ ...data, ...form })) return;
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
   };
@@ -618,12 +719,12 @@ function ProfileEditor({ data, setData }) {
   );
 }
 
-function SettingsPanel({ data, setData, onPreview }) {
+function SettingsPanel({ data, setData }) {
   const [slug, setSlug] = useState(data.slug);
   const [saved, setSaved] = useState(false);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    setData({ ...data, slug });
+    if (await setData({ ...data, slug })) return;
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
   };
@@ -637,7 +738,6 @@ function SettingsPanel({ data, setData, onPreview }) {
         <div className="setting-row"><div><Globe2 /><span><b>Public portfolio</b><small>{data.published ? "Your page is visible to anyone with the link." : "Only you can preview this page."}</small></span></div><button type="button" aria-label="Toggle public portfolio" className={`toggle ${data.published ? "on" : ""}`} onClick={() => setData({ ...data, published: !data.published })}><span /></button></div>
         <div className="settings-actions"><span className={`status ${data.published ? "active" : "inactive"}`}>{data.published ? "Published" : "Draft"}</span><button className="accent-button" type="submit">{saved ? <Check size={18} /> : null}{saved ? "Saved" : "Save settings"}</button></div>
       </form>
-      <PageThemePicker value={data.portfolioTheme} onChange={(portfolioTheme) => setData({ ...data, portfolioTheme })} onPreview={onPreview} />
     </div>
   );
 }
@@ -647,8 +747,8 @@ function PageThemePicker({ value, onChange, onPreview }) {
   return (
     <section className="form-card page-theme-card">
       <div className="page-theme-head">
-        <div><Palette /><span><b>Public page theme</b><small>Choose the colors visitors see on your published portfolio.</small></span></div>
-        <button type="button" className="text-button" onClick={onPreview}><Eye size={16} /> Preview</button>
+        <div><Palette size={18} /><span><b>Public page theme</b><small>Choose the colors visitors see on your published portfolio.</small></span></div>
+        <button type="button" className="text-button" onClick={onPreview}><Eye size={15} /> Preview</button>
       </div>
       <div className="page-theme-grid" role="radiogroup" aria-label="Public page theme">
         {Object.entries(pageThemes).map(([key, theme]) => (
@@ -667,13 +767,52 @@ function PageThemePicker({ value, onChange, onPreview }) {
             </span>
             <span className="page-theme-label">
               <span><b>{theme.name}</b><small>{theme.hint}</small></span>
-              {selected === key && <Check size={16} />}
+              {selected === key && <Check size={14} />}
             </span>
           </button>
         ))}
       </div>
     </section>
   );
+}
+
+// Owners see their own (possibly unpublished) page; everyone else gets the published copy.
+function PortfolioPage({ slug, ownData, onBack }) {
+  const own = ownData && ownData.slug === slug ? ownData : null;
+  const builtIn = !own && slug === demoPortfolio.slug ? demoPortfolio : null;
+  const [remote, setRemote] = useState({ slug: null, state: "loading", data: null });
+
+  useEffect(() => {
+    if (own || builtIn) return undefined;
+    let cancelled = false;
+    setRemote({ slug, state: "loading", data: null });
+    api(`/api/portfolios/${encodeURIComponent(slug)}`)
+      .then(({ portfolio }) => !cancelled && setRemote({ slug, state: "ready", data: portfolio }))
+      .catch((error) => !cancelled && setRemote({ slug, state: error.status === 404 ? "missing" : "error", data: null }));
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, Boolean(own || builtIn)]);
+
+  if (own || builtIn) return <Portfolio data={own || builtIn} onBack={onBack} />;
+
+  const themeStyle = pageThemeStyle(getPageTheme());
+  if (remote.slug !== slug || remote.state === "loading") {
+    return <main className="portfolio unpublished-portfolio" style={themeStyle} aria-busy="true" />;
+  }
+  if (remote.state !== "ready") {
+    return (
+      <main className="portfolio unpublished-portfolio" style={themeStyle}>
+        <button className="simple-back" onClick={onBack}><ArrowLeft size={15} /> Livefolio</button>
+        <div>
+          <span>{remote.state === "missing" ? "Not found" : "Something went wrong"}</span>
+          <h1>{remote.state === "missing" ? "This portfolio doesn’t exist." : "We couldn’t load this page."}</h1>
+          <p>{remote.state === "missing" ? "Check the link, or the owner may not have published it yet." : "Please refresh to try again."}</p>
+        </div>
+      </main>
+    );
+  }
+  return <Portfolio data={remote.data} onBack={onBack} />;
 }
 
 function Portfolio({ data, onBack }) {
@@ -694,7 +833,7 @@ function Portfolio({ data, onBack }) {
     <main className="portfolio" style={themeStyle}>
       <header className="simple-portfolio-header">
         <button className="simple-back" onClick={onBack}><ArrowLeft size={15} /> Livefolio</button>
-        <a href={`mailto:${data.email}`}>Contact <ArrowUpRight size={15} /></a>
+        {data.email && <a href={`mailto:${data.email}`}>Contact <ArrowUpRight size={15} /></a>}
       </header>
 
       <section className="simple-portfolio-intro">

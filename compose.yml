@@ -11,9 +11,12 @@ services:
     container_name: livefolio
     restart: unless-stopped
     ports:
-      - "${LIVEFOLIO_PORT:-8080}:80"
+      - "${LIVEFOLIO_PORT:-8080}:8080"
+    volumes:
+      # Accounts, sessions, and portfolios live here and survive redeploys.
+      - livefolio-data:/data
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -31,3 +34,6 @@ services:
     volumes:
       - ./:/repo
       - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  livefolio-data:

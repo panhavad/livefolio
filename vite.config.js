@@ -1,6 +1,8 @@
 import { execSync } from "node:child_process";
+import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { createApi } from "./server/api.js";
 
 function git(args) {
   try {
@@ -30,8 +32,21 @@ function resolveVersion() {
   return `${commitDate}-${commit}`;
 }
 
+// Serves the same /api routes as server/index.js during `npm run dev` and `npm run preview`.
+function livefolioApi() {
+  let handleApi;
+  const mount = (server) => {
+    server.middlewares.use((req, res, next) => {
+      if (!req.url?.startsWith("/api/")) return next();
+      handleApi ??= createApi({ dataDir: path.resolve(process.env.DATA_DIR || ".data") });
+      handleApi(req, res);
+    });
+  };
+  return { name: "livefolio-api", configureServer: mount, configurePreviewServer: mount };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), livefolioApi()],
   define: {
     __APP_VERSION__: JSON.stringify(resolveVersion()),
     __APP_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
