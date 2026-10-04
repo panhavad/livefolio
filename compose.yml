@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-}
     image: ${LIVEFOLIO_IMAGE:-livefolio:local}
     container_name: livefolio
     restart: unless-stopped
@@ -18,7 +20,8 @@ services:
       start_period: 5s
 
   watchtower:
-    image: containrrr/watchtower:1.7.1
+    # containrrr/watchtower is archived and cannot talk to Docker Engine 29+.
+    image: nickfedor/watchtower:1.22.3
     container_name: livefolio-watchtower
     restart: unless-stopped
     profiles: ["auto-update"]
@@ -27,6 +30,8 @@ services:
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_POLL_INTERVAL: "${UPDATE_INTERVAL_SECONDS:-300}"
       WATCHTOWER_ROLLING_RESTART: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      REPO_USER: "${GHCR_USERNAME:-}"
+      REPO_PASS: "${GHCR_TOKEN:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${DOCKER_CONFIG_PATH:-/root/.docker/config.json}:/config.json:ro

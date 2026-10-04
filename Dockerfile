@@ -1,4 +1,5 @@
-FROM node:24-alpine AS build
+# The bundle is static, so build it natively once and reuse it for every target platform.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build
 
 WORKDIR /app
 
@@ -6,6 +7,8 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+ARG APP_VERSION=""
+ENV APP_VERSION=${APP_VERSION}
 RUN npm run build
 
 FROM nginx:1.28-alpine AS runtime

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
@@ -25,33 +25,6 @@ import {
   X,
 } from "lucide-react";
 import "./styles.css";
-
-const themes = {
-  citrus: {
-    name: "Citrus",
-    accent: "#ff5a2a",
-    soft: "#ffe0d5",
-    ink: "#1e1d1a",
-  },
-  electric: {
-    name: "Electric",
-    accent: "#635bff",
-    soft: "#e3e1ff",
-    ink: "#171627",
-  },
-  meadow: {
-    name: "Meadow",
-    accent: "#178a60",
-    soft: "#d8f3e8",
-    ink: "#13221b",
-  },
-  ocean: {
-    name: "Ocean",
-    accent: "#1677d2",
-    soft: "#dceefe",
-    ink: "#13212e",
-  },
-};
 
 const normalizeUrl = (value) => {
   const trimmed = value.trim();
@@ -143,6 +116,31 @@ const demoProjects = [
   },
 ];
 
+const pageThemes = {
+  midnight: { name: "Midnight", hint: "Black", bg: "#050505", text: "#ffffff", muted: "#8a8a8a", line: "#242424", card: "#ffffff", cardText: "#050505", cardBorder: "#282828", accent: "#ff5a2a", shadow: "#000000" },
+  paper: { name: "Paper", hint: "White", bg: "#ffffff", text: "#111111", muted: "#6f6f6f", line: "#e6e6e6", card: "#ffffff", cardText: "#111111", cardBorder: "#dcdcdc", accent: "#ff5a2a", shadow: "#0000001f" },
+  ocean: { name: "Ocean", hint: "Deep blue", bg: "#0a1d47", text: "#ffffff", muted: "#9db0d6", line: "#213a72", card: "#ffffff", cardText: "#0a1d47", cardBorder: "#1c3266", accent: "#4cc2ff", shadow: "#020a1f" },
+  sky: { name: "Sky", hint: "Light blue", bg: "#eaf2ff", text: "#0c2a5b", muted: "#5b6f93", line: "#c8d9f4", card: "#ffffff", cardText: "#0c2a5b", cardBorder: "#c8d9f4", accent: "#2563eb", shadow: "#0c2a5b26" },
+  forest: { name: "Forest", hint: "Deep green", bg: "#0e2a1f", text: "#eef6ee", muted: "#93ad9d", line: "#1f4434", card: "#f6faf4", cardText: "#0e2a1f", cardBorder: "#1f4434", accent: "#8fdc6e", shadow: "#04120c" },
+  sand: { name: "Sand", hint: "Warm cream", bg: "#f3ecdf", text: "#2b2118", muted: "#85735f", line: "#ddd0bb", card: "#fffaf2", cardText: "#2b2118", cardBorder: "#ddd0bb", accent: "#c2410c", shadow: "#2b211826" },
+  plum: { name: "Plum", hint: "Dark purple", bg: "#24102f", text: "#fbf0ff", muted: "#b49cc2", line: "#3d2150", card: "#ffffff", cardText: "#24102f", cardBorder: "#3d2150", accent: "#e879f9", shadow: "#0d0412" },
+  rose: { name: "Rose", hint: "Soft pink", bg: "#fff0f2", text: "#4a0f22", muted: "#96606f", line: "#f4ccd5", card: "#ffffff", cardText: "#4a0f22", cardBorder: "#f4ccd5", accent: "#e11d48", shadow: "#4a0f2226" },
+};
+
+const getPageTheme = (key) => pageThemes[key] || pageThemes.midnight;
+
+const pageThemeStyle = (theme) => ({
+  "--accent": theme.accent,
+  "--pf-bg": theme.bg,
+  "--pf-text": theme.text,
+  "--pf-muted": theme.muted,
+  "--pf-line": theme.line,
+  "--pf-card": theme.card,
+  "--pf-card-text": theme.cardText,
+  "--pf-card-border": theme.cardBorder,
+  "--pf-shadow": theme.shadow,
+});
+
 const defaultData = {
   name: "Maya Chen",
   role: "Independent designer & developer",
@@ -151,9 +149,9 @@ const defaultData = {
   location: "Based in Copenhagen",
   email: "hello@mayachen.design",
   slug: "maya-chen",
-  theme: "citrus",
   published: true,
   studioDark: false,
+  portfolioTheme: "midnight",
   projects: demoProjects,
 };
 
@@ -161,9 +159,10 @@ function usePersistentState() {
   const [data, setData] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("livefolio-data"));
-      return saved
-        ? { ...defaultData, ...saved, projects: saved.projects || defaultData.projects }
-        : defaultData;
+      if (!saved) return defaultData;
+      // Drop the theme saved by the removed Appearance feature.
+      const { theme: _removedTheme, ...rest } = saved;
+      return { ...defaultData, ...rest, projects: rest.projects || defaultData.projects };
     } catch {
       return defaultData;
     }
@@ -273,6 +272,17 @@ function Logo({ light = false }) {
   );
 }
 
+const APP_VERSION = __APP_VERSION__;
+const APP_BUILD_TIME = __APP_BUILD_TIME__;
+
+function AppVersion({ className = "" }) {
+  return (
+    <span className={`app-version ${className}`} title={`Built ${new Date(APP_BUILD_TIME).toLocaleString()}`}>
+      v{APP_VERSION}
+    </span>
+  );
+}
+
 function Landing({ onAuth, onExplore, authenticated, onDashboard }) {
   return (
     <main className="landing">
@@ -352,7 +362,7 @@ function Landing({ onAuth, onExplore, authenticated, onDashboard }) {
         <div className="feature-grid">
           <article><span className="step">01</span><div className="feature-icon"><ExternalLink /></div><h3>Drop in your link</h3><p>Paste any live project URL. That’s genuinely all we need.</p></article>
           <article><span className="step">02</span><div className="feature-icon coral"><LayoutGrid /></div><h3>We make it shine</h3><p>A fresh snapshot becomes a polished project card automatically.</p></article>
-          <article><span className="step">03</span><div className="feature-icon violet"><Palette /></div><h3>Make it feel like you</h3><p>Pick a palette, write your intro, and shape a space that’s unmistakably yours.</p></article>
+          <article><span className="step">03</span><div className="feature-icon violet"><Palette /></div><h3>Make it feel like you</h3><p>Write your intro, choose what to show, and shape a space that’s unmistakably yours.</p></article>
         </div>
       </section>
 
@@ -363,6 +373,11 @@ function Landing({ onAuth, onExplore, authenticated, onDashboard }) {
         </div>
         <button className="accent-button" onClick={() => authenticated ? onDashboard() : onAuth("signup")}>Build your Livefolio <ArrowUpRight size={20} /></button>
       </section>
+
+      <footer className="landing-footer">
+        <span>© {new Date().getFullYear()} Livefolio</span>
+        <AppVersion />
+      </footer>
     </main>
   );
 }
@@ -400,24 +415,18 @@ function AuthModal({ mode, setMode, onClose, onComplete }) {
 
 function Dashboard({ data, setData, onPreview, onLogout }) {
   const [tab, setTab] = useState("projects");
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editingProject, setEditingProject] = useState(null);
+  const [editingId, setEditingId] = useState(null);
   const [copied, setCopied] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const activeCount = data.projects.filter((project) => project.status === "active").length;
 
-  const openEditor = (project = null) => {
-    setEditingProject(project);
-    setEditorOpen(true);
-  };
-
   const saveProject = (project) => {
-    if (editingProject) {
-      setData({ ...data, projects: data.projects.map((item) => item.id === project.id ? project : item) });
-    } else {
+    if (editingId === "new") {
       setData({ ...data, projects: [project, ...data.projects] });
+    } else {
+      setData({ ...data, projects: data.projects.map((item) => item.id === project.id ? project : item) });
     }
-    setEditorOpen(false);
+    setEditingId(null);
   };
 
   const copyLink = () => {
@@ -428,13 +437,12 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
   };
 
   return (
-    <main className={`dashboard ${data.studioDark ? "studio-dark" : ""}`} style={{ "--accent": themes[data.theme].accent, "--soft": themes[data.theme].soft }}>
+    <main className={`dashboard ${data.studioDark ? "studio-dark" : ""}`}>
       <aside className={mobileNav ? "sidebar open" : "sidebar"}>
         <div className="sidebar-top"><Logo /><button className="mobile-close" onClick={() => setMobileNav(false)}><X /></button></div>
         <nav>
           <button className={tab === "projects" ? "active" : ""} onClick={() => { setTab("projects"); setMobileNav(false); }}><LayoutGrid /> Projects</button>
           <button className={tab === "profile" ? "active" : ""} onClick={() => { setTab("profile"); setMobileNav(false); }}><UserRound /> Profile</button>
-          <button className={tab === "appearance" ? "active" : ""} onClick={() => { setTab("appearance"); setMobileNav(false); }}><Palette /> Appearance</button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => { setTab("settings"); setMobileNav(false); }}><Settings /> Settings</button>
         </nav>
         <div className="sidebar-footer">
@@ -444,6 +452,7 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
             <div><b>{data.name}</b><small>Free plan</small></div>
             <button className="user-logout" onClick={onLogout} aria-label="Log out" title="Log out"><LogOut size={17} /></button>
           </div>
+          <AppVersion className="sidebar-version" />
         </div>
       </aside>
 
@@ -459,14 +468,19 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
             <>
               <div className="dashboard-title">
                 <div><span>YOUR WORK</span><h1>Projects <em>{data.projects.length}</em></h1><p>{activeCount} live projects on your public folio.</p></div>
-                <button className="accent-button" onClick={() => openEditor()}><Plus size={19} /> Add project</button>
+                <button className="accent-button" onClick={() => setEditingId("new")} disabled={editingId === "new"}><Plus size={17} /> Add project</button>
               </div>
               <div className="project-list">
-                {data.projects.map((project) => (
+                {editingId === "new" && (
+                  <ProjectEditor key="new-project" project={null} onClose={() => setEditingId(null)} onSave={saveProject} />
+                )}
+                {data.projects.map((project) => editingId === project.id ? (
+                  <ProjectEditor key={project.id} project={project} onClose={() => setEditingId(null)} onSave={saveProject} />
+                ) : (
                   <ProjectRow
                     key={project.id}
                     project={project}
-                    onEdit={() => openEditor(project)}
+                    onEdit={() => setEditingId(project.id)}
                     onDelete={() => setData({ ...data, projects: data.projects.filter((item) => item.id !== project.id) })}
                   />
                 ))}
@@ -474,11 +488,9 @@ function Dashboard({ data, setData, onPreview, onLogout }) {
             </>
           )}
           {tab === "profile" && <ProfileEditor data={data} setData={setData} />}
-          {tab === "appearance" && <AppearanceEditor data={data} setData={setData} onPreview={onPreview} />}
-          {tab === "settings" && <SettingsPanel data={data} setData={setData} />}
+          {tab === "settings" && <SettingsPanel data={data} setData={setData} onPreview={onPreview} />}
         </div>
       </section>
-      {editorOpen && <ProjectEditor project={editingProject} onClose={() => setEditorOpen(false)} onSave={saveProject} />}
     </main>
   );
 }
@@ -494,9 +506,9 @@ function ProjectRow({ project, onEdit, onDelete }) {
         <p>{project.description}</p>
       </div>
       <div className="row-actions">
-        <button onClick={onEdit}><Pencil size={16} /> Edit</button>
+        <button onClick={onEdit}><Pencil size={14} /> Edit</button>
         <div className="more-wrap">
-          <button className="icon-button" onClick={() => setMenu(!menu)}><MoreHorizontal /></button>
+          <button className="icon-button" onClick={() => setMenu(!menu)} aria-label="More actions"><MoreHorizontal size={16} /></button>
           {menu && <div className="more-menu"><button onClick={onDelete}><Trash2 size={15} /> Delete project</button></div>}
         </div>
       </div>
@@ -516,6 +528,13 @@ function ProjectEditor({ project, onClose, onSave }) {
     image: "",
   });
   const [manualImage, setManualImage] = useState(Boolean(project?.image));
+  const editorRef = useRef(null);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    editor?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    editor?.querySelector("input")?.focus({ preventScroll: true });
+  }, []);
 
   const setUrl = (url) => {
     const normalized = normalizeUrl(url);
@@ -537,22 +556,34 @@ function ProjectEditor({ project, onClose, onSave }) {
   };
 
   return (
-    <div className="modal-backdrop editor-backdrop">
-      <div className="project-editor">
-        <div className="editor-header"><div><span>{project ? "EDIT PROJECT" : "NEW PROJECT"}</span><h2>{project ? "Fine-tune your work." : "Add something great."}</h2></div><button className="close-button" onClick={onClose}><X /></button></div>
-        <form onSubmit={submit}>
-          <label>Project URL<div className="url-input"><Globe2 size={18} /><input required maxLength={2048} pattern="https?://.*|[^\s]+\.[^\s]+.*" title="Enter a valid web address, such as example.com" placeholder="yourproject.com" value={form.url} onChange={(e) => setUrl(e.target.value)} /></div><small>We’ll automatically create a fresh snapshot from this link.</small></label>
-          {isHttpUrl(form.image) && <div className="capture-preview"><img src={form.image} alt="Website snapshot preview" onError={(e) => { e.currentTarget.style.display = "none"; }} /><span><Check size={14} /> Snapshot ready</span></div>}
-          <div className="field-row">
-            <label>Project name<input required maxLength={80} placeholder="A wonderful thing" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
-            <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option><option value="deprecated">Deprecated</option></select></label>
+    <article className="project-editor" ref={editorRef} onKeyDown={(e) => e.key === "Escape" && onClose()}>
+      <form onSubmit={submit}>
+        <div className="editor-header">
+          <span>{project ? "Edit project" : "New project"}</span>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Cancel editing" title="Cancel"><X size={15} /></button>
+        </div>
+        <div className="editor-body">
+          <div className="capture-preview">
+            {isHttpUrl(form.image) ? (
+              <>
+                <img src={form.image} alt="Website snapshot preview" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+                <span><Check size={12} /> Snapshot ready</span>
+              </>
+            ) : (
+              <small>Add a URL and we’ll capture a snapshot automatically.</small>
+            )}
           </div>
-          <label>Short description<textarea required maxLength={180} placeholder="What did you make, and why does it matter?" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /><small>{form.description.length}/180</small></label>
-          <label>Custom thumbnail URL <span className="optional">(optional)</span><input maxLength={2048} pattern="https?://.*" title="Enter a complete image URL beginning with http:// or https://" placeholder="https://..." value={manualImage ? form.image : ""} onChange={(e) => { setManualImage(Boolean(e.target.value)); setForm({ ...form, image: e.target.value }); }} /></label>
-          <div className="editor-actions"><button type="button" className="text-button" onClick={onClose}>Cancel</button><button type="submit" className="accent-button">{project ? "Save changes" : "Add to my folio"} <ArrowRight size={18} /></button></div>
-        </form>
-      </div>
-    </div>
+          <div className="editor-fields">
+            <label className="span-2">Project URL<div className="url-input"><Globe2 size={15} /><input required maxLength={2048} pattern="https?://.*|[^\s]+\.[^\s]+.*" title="Enter a valid web address, such as example.com" placeholder="yourproject.com" value={form.url} onChange={(e) => setUrl(e.target.value)} /></div></label>
+            <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option><option value="deprecated">Deprecated</option></select></label>
+            <label>Project name<input required maxLength={80} placeholder="A wonderful thing" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
+            <label className="span-2">Custom thumbnail URL <span className="optional">(optional)</span><input maxLength={2048} pattern="https?://.*" title="Enter a complete image URL beginning with http:// or https://" placeholder="https://..." value={manualImage ? form.image : ""} onChange={(e) => { setManualImage(Boolean(e.target.value)); setForm({ ...form, image: e.target.value }); }} /></label>
+            <label className="span-3">Short description <span className="optional">{form.description.length}/180</span><textarea required maxLength={180} placeholder="What did you make, and why does it matter?" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
+          </div>
+        </div>
+        <div className="editor-actions"><button type="button" className="text-button" onClick={onClose}>Cancel</button><button type="submit" className="accent-button">{project ? "Save changes" : "Add project"} <ArrowRight size={15} /></button></div>
+      </form>
+    </article>
   );
 }
 
@@ -587,27 +618,7 @@ function ProfileEditor({ data, setData }) {
   );
 }
 
-function AppearanceEditor({ data, setData, onPreview }) {
-  return (
-    <div className="panel-page">
-      <div className="dashboard-title"><div><span>YOUR LOOK & FEEL</span><h1>Appearance</h1><p>Choose an accent that makes your portfolio feel like you.</p></div><button className="preview-button" onClick={onPreview}><Eye size={17} /> Preview</button></div>
-      <div className="theme-grid">
-        {Object.entries(themes).map(([id, theme]) => (
-          <button key={id} className={`theme-card ${data.theme === id ? "selected" : ""}`} onClick={() => setData({ ...data, theme: id })}>
-            <div className="theme-preview" style={{ background: theme.soft }}>
-              <span style={{ background: theme.ink }} />
-              <i style={{ background: theme.accent }} />
-              <b style={{ background: theme.ink }} />
-            </div>
-            <div><span className="theme-dot" style={{ background: theme.accent }} /><strong>{theme.name}</strong>{data.theme === id && <Check size={17} />}</div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SettingsPanel({ data, setData }) {
+function SettingsPanel({ data, setData, onPreview }) {
   const [slug, setSlug] = useState(data.slug);
   const [saved, setSaved] = useState(false);
   const submit = (event) => {
@@ -626,18 +637,53 @@ function SettingsPanel({ data, setData }) {
         <div className="setting-row"><div><Globe2 /><span><b>Public portfolio</b><small>{data.published ? "Your page is visible to anyone with the link." : "Only you can preview this page."}</small></span></div><button type="button" aria-label="Toggle public portfolio" className={`toggle ${data.published ? "on" : ""}`} onClick={() => setData({ ...data, published: !data.published })}><span /></button></div>
         <div className="settings-actions"><span className={`status ${data.published ? "active" : "inactive"}`}>{data.published ? "Published" : "Draft"}</span><button className="accent-button" type="submit">{saved ? <Check size={18} /> : null}{saved ? "Saved" : "Save settings"}</button></div>
       </form>
+      <PageThemePicker value={data.portfolioTheme} onChange={(portfolioTheme) => setData({ ...data, portfolioTheme })} onPreview={onPreview} />
     </div>
   );
 }
 
+function PageThemePicker({ value, onChange, onPreview }) {
+  const selected = pageThemes[value] ? value : "midnight";
+  return (
+    <section className="form-card page-theme-card">
+      <div className="page-theme-head">
+        <div><Palette /><span><b>Public page theme</b><small>Choose the colors visitors see on your published portfolio.</small></span></div>
+        <button type="button" className="text-button" onClick={onPreview}><Eye size={16} /> Preview</button>
+      </div>
+      <div className="page-theme-grid" role="radiogroup" aria-label="Public page theme">
+        {Object.entries(pageThemes).map(([key, theme]) => (
+          <button
+            type="button"
+            key={key}
+            role="radio"
+            aria-checked={selected === key}
+            className={`page-theme-option ${selected === key ? "selected" : ""}`}
+            onClick={() => onChange(key)}
+          >
+            <span className="page-theme-preview" style={pageThemeStyle(theme)}>
+              <i className="ptp-title" />
+              <i className="ptp-rule" />
+              <span className="ptp-cards"><i /><i /><i /></span>
+            </span>
+            <span className="page-theme-label">
+              <span><b>{theme.name}</b><small>{theme.hint}</small></span>
+              {selected === key && <Check size={16} />}
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Portfolio({ data, onBack }) {
-  const theme = themes[data.theme] || themes.citrus;
   const visibleProjects = data.projects.filter((project) => project.status !== "inactive");
   const portfolioTitle = `${data.name.split(" ")[0]}'s projects`;
+  const themeStyle = pageThemeStyle(getPageTheme(data.portfolioTheme));
 
   if (!data.published) {
     return (
-      <main className="portfolio unpublished-portfolio" style={{ "--accent": theme.accent }}>
+      <main className="portfolio unpublished-portfolio" style={themeStyle}>
         <button className="simple-back" onClick={onBack}><ArrowLeft size={15} /> Back to studio</button>
         <div><span>Draft portfolio</span><h1>This page isn’t published yet.</h1><p>Publish it from Settings when it’s ready to share.</p></div>
       </main>
@@ -645,7 +691,7 @@ function Portfolio({ data, onBack }) {
   }
 
   return (
-    <main className="portfolio" style={{ "--accent": theme.accent }}>
+    <main className="portfolio" style={themeStyle}>
       <header className="simple-portfolio-header">
         <button className="simple-back" onClick={onBack}><ArrowLeft size={15} /> Livefolio</button>
         <a href={`mailto:${data.email}`}>Contact <ArrowUpRight size={15} /></a>
