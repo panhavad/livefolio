@@ -10,8 +10,10 @@ services:
     image: livefolio:local
     container_name: livefolio
     restart: unless-stopped
-    # Reaps the headless browser's child processes.
+    # Reaps the browser's child processes.
     init: true
+    environment:
+      LIVEFOLIO_SNAPSHOT_REFRESH_MINUTES: "${SNAPSHOT_REFRESH_MINUTES:-10}"
     ports:
       - "${LIVEFOLIO_PORT:-8080}:8080"
     volumes:

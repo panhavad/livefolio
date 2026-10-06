@@ -255,6 +255,24 @@ function useAccount() {
     setAccount(signedOut);
   };
 
+  // Swaps in refreshed snapshot images from the server without saving anything.
+  const mergeImages = (images) => {
+    if (!images) return;
+    const apply = (data) => {
+      if (!data) return data;
+      let changed = false;
+      const projects = data.projects.map((project) => {
+        const next = images[project.id];
+        if (next === undefined || next === project.image || (project.imageSource || "snapshot") !== "snapshot") return project;
+        changed = true;
+        return { ...project, image: next };
+      });
+      return changed ? { ...data, projects } : data;
+    };
+    confirmed.current = apply(confirmed.current);
+    setAccount((current) => (current.status === "in" ? { ...current, data: apply(current.data) } : current));
+  };
+
   // Resolves to an error message, or "" once the server has saved the change.
   const setData = (next) => {
     setAccount((current) => ({ ...current, data: next }));
@@ -264,6 +282,8 @@ function useAccount() {
     return request.then(
       ({ data }) => {
         confirmed.current = data;
+        // The server keeps a newer background snapshot if this save carried an older one.
+        mergeImages(Object.fromEntries(data.projects.map((project) => [project.id, project.image])));
         return "";
       },
       (error) => {
@@ -279,7 +299,50 @@ function useAccount() {
     );
   };
 
-  return { ...account, setData, saveError, clearSaveError: () => setSaveError(""), signIn, signOut };
+  return { ...account, setData, mergeImages, saveError, clearSaveError: () => setSaveError(""), signIn, signOut };
+}
+
+// Asks the server to refresh website snapshots whenever the owner opens the studio or
+// their page (or comes back to the tab), then polls until the new images are ready.
+// The server limits how often each project is actually re-captured.
+function useSnapshotRefresh(authenticated, screen, mergeImages) {
+  const [refreshing, setRefreshing] = useState([]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setRefreshing([]);
+      return undefined;
+    }
+    let cancelled = false;
+    let timer;
+    const poll = async (method, startedAt) => {
+      try {
+        const status = await api("/api/portfolio/snapshots", method === "POST" ? { method, body: {} } : {});
+        if (cancelled) return;
+        mergeImages(status.images);
+        setRefreshing(status.refreshing);
+        if (status.refreshing.length && Date.now() - startedAt < 5 * 60 * 1000) {
+          timer = window.setTimeout(() => poll("GET", startedAt), 3000);
+        }
+      } catch {
+        if (!cancelled) setRefreshing([]);
+      }
+    };
+    const start = () => {
+      window.clearTimeout(timer);
+      poll("POST", Date.now());
+    };
+    const onVisible = () => document.visibilityState === "visible" && start();
+    start();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [authenticated, screen]);
+
+  return refreshing;
 }
 
 function App() {
@@ -290,6 +353,7 @@ function App() {
   const [slug, setSlug] = useState(getSlugFromPath);
   const [authMode, setAuthMode] = useState("signup");
   const [authOpen, setAuthOpen] = useState(false);
+  const refreshingSnapshots = useSnapshotRefresh(authenticated, screen, account.mergeImages);
 
   const openAuth = (mode) => {
     setAuthMode(mode);
@@ -354,6 +418,7 @@ function App() {
         data={data}
         setData={account.setData}
         saveError={account.saveError}
+        refreshingSnapshots={refreshingSnapshots}
         onDismissError={account.clearSaveError}
         onPreview={() => navigate("portfolio")}
         onLogout={async () => {
@@ -548,7 +613,7 @@ function AuthModal({ mode, setMode, onClose, onComplete }) {
   );
 }
 
-function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogout }) {
+function Dashboard({ data, setData, saveError, refreshingSnapshots = [], onDismissError, onPreview, onLogout }) {
   const [tab, setTab] = useState("projects");
   const [editingId, setEditingId] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -622,6 +687,7 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
                   <ProjectRow
                     key={project.id}
                     project={project}
+                    refreshing={refreshingSnapshots.includes(project.id)}
                     onEdit={() => setEditingId(project.id)}
                     onDelete={() => setData({ ...data, projects: data.projects.filter((item) => item.id !== project.id) })}
                   />
@@ -649,11 +715,14 @@ function ProjectImage({ project, alt = "" }) {
   return <img src={project.image} alt={alt} onError={() => setFailed(true)} />;
 }
 
-function ProjectRow({ project, onEdit, onDelete }) {
+function ProjectRow({ project, refreshing, onEdit, onDelete }) {
   const [menu, setMenu] = useState(false);
   return (
     <article className="project-row">
-      <div className="project-thumb"><ProjectImage project={project} /></div>
+      <div className="project-thumb">
+        <ProjectImage project={project} />
+        {refreshing && <span className="thumb-refreshing" title="Refreshing snapshot"><LoaderCircle size={11} className="spin" /> Updating</span>}
+      </div>
       <div className="project-details">
         <div className="project-line"><h3>{project.title}</h3><span className={`status ${project.status}`}>{project.status}</span></div>
         <a href={project.url} target="_blank" rel="noreferrer">{project.url.replace(/^https?:\/\//, "")} <ArrowUpRight size={13} /></a>
@@ -825,7 +894,7 @@ function ProjectEditor({ project, onClose, onSave }) {
             <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option><option value="deprecated">Deprecated</option></select></label>
             <label>Project name<input required maxLength={80} placeholder="A wonderful thing" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
             <label className="span-2">Or use an image URL <span className="optional">(optional)</span><input maxLength={2048} pattern="https?://.*" title="Enter a complete image URL beginning with http:// or https://" placeholder="https://..." value={form.imageSource === "url" ? form.image : ""} onChange={(e) => setImageUrl(e.target.value)} /></label>
-            <label className="span-3">Short description <span className="optional">{form.description.length}/180</span><textarea required maxLength={180} placeholder="What did you make, and why does it matter?" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
+            <label className="span-3">Short description <span className="optional">(optional) {form.description.length}/180</span><textarea maxLength={180} placeholder="What did you make, and why does it matter?" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
           </div>
         </div>
         <div className="editor-actions"><button type="button" className="text-button" onClick={onClose}>Cancel</button><button type="submit" className="accent-button" disabled={busy}>{busy ? (uploading ? "Uploading…" : "Capturing…") : project ? "Save changes" : "Add project"} {!busy && <ArrowRight size={15} />}</button></div>
@@ -939,12 +1008,23 @@ function PortfolioPage({ slug, ownData, onBack }) {
   useEffect(() => {
     if (own || builtIn) return undefined;
     let cancelled = false;
+    let timer;
+    const startedAt = Date.now();
     setRemote({ slug, state: "loading", data: null });
-    api(`/api/portfolios/${encodeURIComponent(slug)}`)
-      .then(({ portfolio }) => !cancelled && setRemote({ slug, state: "ready", data: portfolio }))
-      .catch((error) => !cancelled && setRemote({ slug, state: error.status === 404 ? "missing" : "error", data: null }));
+    // Fresh snapshots may be on their way; re-fetch until they land (for a couple of minutes at most).
+    const load = (initial) => api(`/api/portfolios/${encodeURIComponent(slug)}`)
+      .then(({ portfolio, refreshing = [] }) => {
+        if (cancelled) return;
+        setRemote({ slug, state: "ready", data: portfolio });
+        if (refreshing.length && Date.now() - startedAt < 2 * 60 * 1000) timer = window.setTimeout(() => load(false), 4000);
+      })
+      .catch((error) => {
+        if (!cancelled && initial) setRemote({ slug, state: error.status === 404 ? "missing" : "error", data: null });
+      });
+    load(true);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [slug, Boolean(own || builtIn)]);
 

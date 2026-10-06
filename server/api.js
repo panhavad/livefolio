@@ -30,6 +30,9 @@ const IMAGE_PATH_RE = /^\/api\/images\/([A-Za-z0-9_-]{22})\.(png|jpg|webp|gif)$/
 // Snapshots from the old third-party service were never checked for bot-check pages.
 const LEGACY_SNAPSHOT_RE = /^https:\/\/image\.thum\.io\//;
 const LEGACY_RETRY_MS = 6 * 60 * 60 * 1000;
+// Website snapshots refresh in the background when the studio or a public page is opened,
+// at most this often per project so page views can't keep the browser busy.
+const SNAPSHOT_REFRESH_MS = Math.max(1, Number(process.env.LIVEFOLIO_SNAPSHOT_REFRESH_MINUTES || 10)) * 60 * 1000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -494,9 +497,84 @@ export function createApi({ dataDir }) {
   }
   scheduleLegacyMigration(Number(process.env.LIVEFOLIO_MIGRATION_DELAY_MS || 10_000));
 
+  const refreshing = new Set();
+  const lastRefreshAttempt = new Map();
+  const userQueues = new Map();
+  const refreshKey = (user, projectId) => `${user.id}:${projectId}`;
+  const isSnapshotProject = (project) => (project.imageSource || "snapshot") === "snapshot";
+  const storedImage = (db, image) => {
+    const id = IMAGE_PATH_RE.exec(image || "")?.[1];
+    return id ? db.images[id] : null;
+  };
+
+  async function refreshProjectSnapshot(db, user, projectId, url) {
+    lastRefreshAttempt.set(refreshKey(user, projectId), Date.now());
+    let shot;
+    try {
+      shot = await captureSnapshot(url);
+    } catch {
+      // Blocked, blank, or unreachable this time: keep showing the last good snapshot.
+      return;
+    }
+    const stillWanted = () => {
+      const current = user.data.projects.find((item) => item.id === projectId);
+      return current && current.url === url && isSnapshotProject(current) ? current : null;
+    };
+    if (!stillWanted()) return;
+    const image = await storeImage(db, user, shot.buffer, shot.type, "snapshot");
+    const current = stillWanted();
+    if (!current) return;
+    current.image = image;
+    current.imageSource = "snapshot";
+    await store.persist();
+  }
+
+  // Queues a background refresh for the user's snapshot projects that are due one.
+  // Captures for one portfolio run one at a time; the browser itself is shared.
+  function refreshSnapshots(db, user, { visibleOnly = false } = {}) {
+    const now = Date.now();
+    for (const project of user.data.projects) {
+      const key = refreshKey(user, project.id);
+      if (!isSnapshotProject(project) || refreshing.has(key)) continue;
+      if (visibleOnly && project.status === "inactive") continue;
+      const last = Math.max(storedImage(db, project.image)?.createdAt || 0, lastRefreshAttempt.get(key) || 0);
+      if (now - last < SNAPSHOT_REFRESH_MS) continue;
+      refreshing.add(key);
+      const { id, url } = project;
+      const queue = (userQueues.get(user.id) || Promise.resolve())
+        .then(() => refreshProjectSnapshot(db, user, id, url))
+        .catch((error) => console.error("Livefolio: snapshot refresh failed", error))
+        .finally(() => refreshing.delete(key));
+      userQueues.set(user.id, queue);
+    }
+  }
+
+  const snapshotStatus = (user, projects = user.data.projects) => ({
+    refreshing: projects.filter((project) => refreshing.has(refreshKey(user, project.id))).map((project) => project.id),
+    images: Object.fromEntries(projects.filter(isSnapshotProject).map((project) => [project.id, project.image])),
+  });
+
+  // A save sent from a page loaded before a background refresh would otherwise put the
+  // older snapshot back (or point at one that has since been cleaned up).
+  function keepNewerSnapshots(db, user, incoming) {
+    if (!Array.isArray(incoming?.projects)) return;
+    const saved = new Map(user.data.projects.map((project) => [project.id, project]));
+    for (const project of incoming.projects) {
+      const existing = project && saved.get(project.id);
+      if (!existing || !isSnapshotProject(existing) || project.imageSource !== "snapshot" || project.url !== existing.url) continue;
+      if (!project.image || project.image === existing.image) continue;
+      const current = storedImage(db, existing.image);
+      if (!current) continue;
+      const sent = storedImage(db, project.image);
+      const sentIsOlder = IMAGE_PATH_RE.test(project.image) ? !sent || sent.createdAt < current.createdAt : LEGACY_SNAPSHOT_RE.test(project.image);
+      if (sentIsOlder) project.image = existing.image;
+    }
+  }
+
   async function savePortfolio(req, res, db) {
     const session = requireSession(db, req);
     const body = await readJson(req);
+    keepNewerSnapshots(db, session.user, body.data);
     const data = sanitizeData(body.data, ownsImage(db, session.user.id));
     if (slugTaken(db, data.slug, session.user.id)) throw new HttpError(409, "That public URL is already taken.");
     session.user.data = data;
@@ -577,6 +655,13 @@ export function createApi({ dataDir }) {
       if (pathname === "/api/snapshots" && method === "POST") return await takeSnapshot(req, res, db);
       if (pathname === "/api/images" && method === "POST") return await uploadImage(req, res, db);
 
+      // The owner's studio asks for fresh snapshots on load, then polls until they're done.
+      if (pathname === "/api/portfolio/snapshots" && (method === "POST" || method === "GET")) {
+        const { user } = requireSession(db, req);
+        if (method === "POST") refreshSnapshots(db, user);
+        return send(res, 200, snapshotStatus(user));
+      }
+
       const image = IMAGE_PATH_RE.exec(pathname);
       if (image && (method === "GET" || method === "HEAD")) return serveImage(req, res, db, image[1], image[2]);
 
@@ -584,7 +669,9 @@ export function createApi({ dataDir }) {
       if (match && method === "GET") {
         const owner = Object.values(db.users).find((user) => user.data.slug === match[1]);
         if (!owner || !owner.data.published) throw new HttpError(404, "Portfolio not found.");
-        return send(res, 200, { portfolio: publicPortfolio(owner.data) });
+        refreshSnapshots(db, owner, { visibleOnly: true });
+        const portfolio = publicPortfolio(owner.data);
+        return send(res, 200, { portfolio, refreshing: snapshotStatus(owner, portfolio.projects).refreshing });
       }
 
       throw new HttpError(404, "Not found.");

@@ -7,7 +7,8 @@ Node.js server for accounts and storage.
 
 - Accounts with server-side password checks and secure session cookies
 - Editable public profile and introduction
-- Project cards with automatic website snapshots that skip bot-check pages
+- Project cards with automatic website snapshots that skip bot-check pages and
+  refresh themselves when the studio or portfolio page is opened
 - Upload or replace a custom image for any project
 - Active, inactive, and deprecated project states
 - Shareable public portfolio URLs at `/p/your-name`
@@ -71,6 +72,15 @@ snapshot, it makes sure the page isn't a bot check:
   mid-capture.
 - **Self-clearing checks:** a "Just a moment…" check that clears on its own
   gets up to 20 seconds to finish, and then the real page is captured.
+
+Snapshots stay current on their own. Opening the studio, returning to its tab,
+or opening a public portfolio page refreshes them in the background. You see
+the current image right away, and the new one appears as soon as it's ready;
+the studio shows a small "Updating" badge while that happens. Each project is
+re-captured at most once every 10 minutes, so page views can't keep the server
+busy (set `SNAPSHOT_REFRESH_MINUTES` in `.env` to change this). If a refresh is
+blocked or the site is down, the last good snapshot stays. Uploaded images and
+image URLs are never replaced.
 
 When a snapshot is skipped, the editor explains why. You can upload your own
 image (PNG, JPEG, WebP, or GIF, up to 5 MB) or paste an image URL. Use
