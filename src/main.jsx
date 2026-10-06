@@ -636,10 +636,14 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
   );
 }
 
+// Snapshots from the old third-party service were never checked and can show a bot-check
+// page, so they're never displayed; the server re-captures them in the background.
+const isLegacySnapshot = (image) => /^https:\/\/image\.thum\.io\//.test(image || "");
+
 function ProjectImage({ project, alt = "" }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [project.image]);
-  if (!project.image || failed) {
+  if (!project.image || failed || isLegacySnapshot(project.image)) {
     return <span className="project-placeholder"><Globe2 size={18} /><b>{hostnameOf(project.url)}</b></span>;
   }
   return <img src={project.image} alt={alt} onError={() => setFailed(true)} />;
@@ -678,7 +682,12 @@ const SNAPSHOT_PROBLEMS = {
 };
 
 function ProjectEditor({ project, onClose, onSave }) {
-  const [form, setForm] = useState(() => project ? { ...project, imageSource: inferImageSource(project) } : {
+  const [form, setForm] = useState(() => project ? {
+    ...project,
+    // Drop an unchecked legacy snapshot so a fresh, checked one is captured right away.
+    image: isLegacySnapshot(project.image) ? "" : project.image,
+    imageSource: inferImageSource(project),
+  } : {
     id: Date.now(),
     title: "",
     url: "",
@@ -693,7 +702,7 @@ function ProjectEditor({ project, onClose, onSave }) {
   const [shot, setShot] = useState(() => ({
     state: "idle",
     message: "",
-    url: project?.image && inferImageSource(project) === "snapshot" ? normalizeUrl(project.url) : "",
+    url: project?.image && !isLegacySnapshot(project.image) && inferImageSource(project) === "snapshot" ? normalizeUrl(project.url) : "",
   }));
   const [uploading, setUploading] = useState(false);
   const [imageError, setImageError] = useState("");

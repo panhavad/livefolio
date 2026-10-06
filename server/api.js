@@ -27,6 +27,9 @@ const STATUSES = new Set(["active", "inactive", "deprecated"]);
 const IMAGE_SOURCES = new Set(["snapshot", "upload", "url"]);
 const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 const IMAGE_PATH_RE = /^\/api\/images\/([A-Za-z0-9_-]{22})\.(png|jpg|webp|gif)$/;
+// Snapshots from the old third-party service were never checked for bot-check pages.
+const LEGACY_SNAPSHOT_RE = /^https:\/\/image\.thum\.io\//;
+const LEGACY_RETRY_MS = 6 * 60 * 60 * 1000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -185,7 +188,9 @@ const publicPortfolio = (data) => ({
   pageTitle: data.pageTitle || "",
   published: true,
   portfolioTheme: data.portfolioTheme,
-  projects: data.projects.filter((project) => project.status !== "inactive"),
+  projects: data.projects
+    .filter((project) => project.status !== "inactive")
+    .map((project) => (LEGACY_SNAPSHOT_RE.test(project.image || "") ? { ...project, image: "" } : project)),
 });
 
 function parseCookies(header = "") {
@@ -440,6 +445,54 @@ export function createApi({ dataDir }) {
     await store.persist();
     return `/api/images/${id}.${type}`;
   }
+
+  // Re-captures old third-party snapshots with the bot-check-aware capture. Images that
+  // turn out to be bot checks are removed (the project shows a placeholder); temporary
+  // failures are retried later. Returns how many still need another attempt.
+  async function migrateLegacySnapshots() {
+    const db = await store.load();
+    let remaining = 0;
+    let replaced = 0;
+    for (const user of Object.values(db.users)) {
+      for (const project of [...user.data.projects]) {
+        const legacy = project.image;
+        if (!LEGACY_SNAPSHOT_RE.test(legacy || "")) continue;
+        let image = "";
+        try {
+          const shot = await captureSnapshot(project.url);
+          image = await storeImage(db, user, shot.buffer, shot.type, "snapshot");
+        } catch (error) {
+          if (!(error instanceof SnapshotError && ["blocked", "blank", "invalid"].includes(error.status))) {
+            remaining += 1;
+            continue;
+          }
+        }
+        // The owner may have edited the project meanwhile; only swap out the legacy image.
+        const current = user.data.projects.find((item) => item.id === project.id);
+        if (current?.image !== legacy) continue;
+        current.image = image;
+        current.imageSource = "snapshot";
+        replaced += 1;
+        await store.persist();
+      }
+    }
+    if (replaced) console.log(`Livefolio: re-checked ${replaced} old snapshot(s).`);
+    return remaining;
+  }
+
+  function scheduleLegacyMigration(delayMs) {
+    const timer = setTimeout(async () => {
+      let remaining = 1;
+      try {
+        remaining = await migrateLegacySnapshots();
+      } catch (error) {
+        console.error("Livefolio: re-checking old snapshots failed", error);
+      }
+      if (remaining) scheduleLegacyMigration(LEGACY_RETRY_MS);
+    }, delayMs);
+    timer.unref?.();
+  }
+  scheduleLegacyMigration(Number(process.env.LIVEFOLIO_MIGRATION_DELAY_MS || 10_000));
 
   async function savePortfolio(req, res, db) {
     const session = requireSession(db, req);

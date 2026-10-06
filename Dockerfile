@@ -15,17 +15,19 @@ FROM node:24-alpine3.24 AS runtime
 
 LABEL org.opencontainers.image.title="livefolio"
 
-# Chromium renders project snapshots (and checks them for bot-check pages).
-# The fonts cover Latin, most other scripts, CJK, and emoji.
+# Chromium renders project snapshots (and checks them for bot-check pages). It runs as a
+# regular windowed browser on an Xvfb virtual display, which passes far more automatic
+# bot checks than headless mode. The fonts cover Latin, most other scripts, CJK, and emoji.
 RUN apk add --no-cache \
-      chromium nss freetype harfbuzz ca-certificates \
+      chromium nss freetype harfbuzz ca-certificates xvfb \
       font-liberation font-noto font-noto-cjk font-noto-emoji
 
 ENV NODE_ENV=production \
     PORT=8080 \
     DATA_DIR=/data \
     CHROME_PATH=/usr/bin/chromium \
-    LIVEFOLIO_CHROME_NO_SANDBOX=1
+    LIVEFOLIO_CHROME_NO_SANDBOX=1 \
+    LIVEFOLIO_CHROME_HEADFUL=1
 
 WORKDIR /app
 

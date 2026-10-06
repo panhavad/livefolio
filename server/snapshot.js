@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
@@ -9,7 +10,7 @@ const VIEWPORT = { width: 1200, height: 700 };
 const ALLOWED_PORTS = new Set(["", "80", "443", "8080", "8443"]);
 const NAVIGATION_TIMEOUT_MS = 20000;
 // How long to give a "Just a moment…" style check to clear by itself.
-const CHALLENGE_WAIT_MS = 12000;
+const CHALLENGE_WAIT_MS = 20000;
 const MAX_CONCURRENT_CAPTURES = 2;
 const BROWSER_IDLE_MS = 2 * 60 * 1000;
 
@@ -219,9 +220,63 @@ function findBrowser() {
 
 let browserPromise = null;
 let proxyPromise = null;
+let displayPromise = null;
 let idleTimer = null;
 let activeCaptures = 0;
 const waiting = [];
+
+// Starts a virtual X display (Xvfb) so Chromium can run as a regular windowed browser
+// on a server. Resolves to a DISPLAY value, or null when Xvfb isn't available.
+function startVirtualDisplay() {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // -displayfd makes Xvfb pick a free display and write its number to fd 3.
+      child = spawn("Xvfb", ["-displayfd", "3", "-screen", "0", "1366x900x24", "-nolisten", "tcp"], {
+        stdio: ["ignore", "ignore", "ignore", "pipe"],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let output = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(null);
+    }, 8000);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("exit", () => {
+      displayPromise = null;
+    });
+    child.stdio[3].on("data", (chunk) => {
+      output += chunk;
+      const match = /(\d+)\s/.exec(output);
+      if (match) {
+        clearTimeout(timer);
+        child.stdio[3].destroy();
+        child.unref();
+        resolve({ display: `:${match[1]}`, child });
+      }
+    });
+  });
+}
+
+// A regular (headed) browser passes far more automatic bot checks than headless mode.
+async function browserMode() {
+  if (process.env.LIVEFOLIO_CHROME_HEADFUL !== "1") return { headless: true, env: process.env };
+  if (process.platform !== "linux" || process.env.DISPLAY) return { headless: false, env: process.env };
+  displayPromise ??= startVirtualDisplay();
+  const virtual = await displayPromise;
+  if (!virtual) {
+    displayPromise = null;
+    console.warn("Livefolio: Xvfb isn't available, so snapshots fall back to headless Chromium.");
+    return { headless: true, env: process.env };
+  }
+  return { headless: false, env: { ...process.env, DISPLAY: virtual.display } };
+}
 
 async function launchBrowser() {
   const executablePath = findBrowser();
@@ -231,6 +286,7 @@ async function launchBrowser() {
   proxyPromise ??= startEgressProxy();
   const { port } = await proxyPromise;
   const { default: puppeteer } = await import("puppeteer-core");
+  const { headless, env } = await browserMode();
   const args = [
     `--proxy-server=http://127.0.0.1:${port}`,
     // Send loopback traffic through the proxy too, where it gets refused.
@@ -238,7 +294,6 @@ async function launchBrowser() {
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--disable-blink-features=AutomationControlled",
     "--disable-dev-shm-usage",
-    "--disable-gpu",
     "--disable-extensions",
     "--disable-background-networking",
     "--disable-sync",
@@ -247,10 +302,14 @@ async function launchBrowser() {
     "--hide-scrollbars",
     "--mute-audio",
     "--lang=en-US",
+    `--window-size=${VIEWPORT.width},${VIEWPORT.height + 120}`,
   ];
+  if (headless) args.push("--disable-gpu");
+  // Keep a headed window out of sight on desktops used for development.
+  else if (process.platform !== "linux") args.push("--window-position=-3000,-3000");
   // Containers usually can't create the namespaces Chromium's sandbox needs.
   if (process.env.LIVEFOLIO_CHROME_NO_SANDBOX === "1") args.push("--no-sandbox");
-  const browser = await puppeteer.launch({ executablePath, headless: true, args, defaultViewport: VIEWPORT });
+  const browser = await puppeteer.launch({ executablePath, headless, env, args, defaultViewport: VIEWPORT });
   browser.on("disconnected", () => {
     browserPromise = null;
   });
@@ -299,6 +358,9 @@ export async function closeSnapshotBrowser() {
   const proxy = await proxyPromise?.catch(() => null);
   proxyPromise = null;
   proxy?.server.close();
+  const display = await displayPromise?.catch(() => null);
+  displayPromise = null;
+  display?.child.kill();
 }
 
 async function readPage(page) {

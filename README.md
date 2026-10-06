@@ -56,8 +56,11 @@ npm start   # serves dist/ and the API on http://localhost:8080
 
 ## Project images and snapshots
 
-When you add a project URL, the server opens the page in a headless Chromium
-browser, checks it, and stores a screenshot on the server. Before keeping a
+When you add a project URL, the server opens the page in Chromium, checks it,
+and stores a screenshot on the server. In Docker, Chromium runs as a regular
+windowed browser on a virtual display (Xvfb). That passes far more automatic bot
+checks, such as Cloudflare's "Performing security verification", than headless
+mode. If Xvfb isn't available, it falls back to headless. Before keeping a
 snapshot, it makes sure the page isn't a bot check:
 
 - **Skipped pages:** interstitials and overlays from Cloudflare, DataDome,
@@ -66,8 +69,8 @@ snapshot, it makes sure the page isn't a bot check:
 - **Same render:** the check and the screenshot come from the same page load.
   A second check right after the screenshot discards it if a challenge pops up
   mid-capture.
-- **Self-clearing checks:** a short "Just a moment…" check that clears on its
-  own gets a few seconds to finish, and then the real page is captured.
+- **Self-clearing checks:** a "Just a moment…" check that clears on its own
+  gets up to 20 seconds to finish, and then the real page is captured.
 
 When a snapshot is skipped, the editor explains why. You can upload your own
 image (PNG, JPEG, WebP, or GIF, up to 5 MB) or paste an image URL. Use
@@ -75,10 +78,23 @@ image (PNG, JPEG, WebP, or GIF, up to 5 MB) or paste an image URL. Use
 resized and re-encoded in the browser, which also strips location metadata.
 Projects without an image show a tidy placeholder with the site's domain.
 
+If a site still shows an interactive challenge (for example "Press & Hold" or
+a checkbox), Livefolio doesn't try to solve it. If it's your own site, the most
+reliable fix is to let Livefolio through. In Cloudflare, add a WAF custom rule
+that skips the challenge for your Livefolio server's IP address, then press
+**Retake**.
+
+Snapshots made before this checker existed came from a third-party service and
+were never checked, so some of them show a bot-check page. They're never
+displayed. The server re-captures them automatically shortly after it starts,
+and opening such a project in the editor re-captures it right away. Any that
+are still blocked show the placeholder instead.
+
 The snapshot browser only reaches public websites. All of its traffic goes
 through a built-in proxy that refuses private, loopback, link-local, and cloud
 metadata addresses, including after redirects. Unused images are cleaned up a
 few hours after they're replaced.
+
 ## Versioning
 
 The app shows its version in the landing page footer and at the bottom of the
