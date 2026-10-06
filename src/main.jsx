@@ -5,19 +5,24 @@ import {
   ArrowRight,
   ArrowUpRight,
   Check,
+  CircleAlert,
   Copy,
   ExternalLink,
   Eye,
   EyeOff,
   Globe2,
+  ImagePlus,
   LayoutGrid,
+  LoaderCircle,
   LogOut,
   Menu,
+  Moon,
   MoreHorizontal,
   Palette,
   Pencil,
   Plus,
-  Settings,
+  RefreshCw,
+  ShieldAlert,
   Sparkles,
   Sun,
   Trash2,
@@ -71,14 +76,16 @@ const getSlugFromPath = () => {
   }
 };
 
+// Sends JSON by default; a Blob body (an image upload) is sent as-is with its own type.
 async function api(path, { method = "GET", body } = {}) {
+  const isBlob = body instanceof Blob;
   let response;
   try {
     response = await fetch(path, {
       method,
       credentials: "same-origin",
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: body === undefined ? undefined : { "Content-Type": isBlob ? body.type : "application/json" },
+      body: body === undefined ? undefined : isBlob ? body : JSON.stringify(body),
     });
   } catch {
     throw Object.assign(new Error("Can’t reach Livefolio. Check your connection and try again."), { status: 0 });
@@ -88,6 +95,40 @@ async function api(path, { method = "GET", body } = {}) {
     throw Object.assign(new Error(payload.error || "Something went wrong. Please try again."), { status: response.status });
   }
   return payload;
+}
+
+const hostnameOf = (url) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+};
+
+const defaultPageTitle = (data) => `${data.name.split(" ")[0]}'s projects`;
+
+const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const MAX_UPLOAD_MB = 5;
+
+// Shrinks large photos and re-encodes them, which also strips location metadata.
+async function prepareUpload(file) {
+  if (file.type === "image/gif") return file;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return file;
+  }
+  const scale = Math.min(1, 1800 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const encode = (type) => new Promise((resolve) => canvas.toBlob(resolve, type, 0.86));
+  const webp = await encode("image/webp");
+  if (webp?.type === "image/webp") return webp;
+  return (await encode("image/jpeg")) || file;
 }
 
 const demoProjects = [
@@ -537,7 +578,6 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
         <nav>
           <button className={tab === "projects" ? "active" : ""} onClick={() => { setTab("projects"); setMobileNav(false); }}><LayoutGrid /> Projects</button>
           <button className={tab === "profile" ? "active" : ""} onClick={() => { setTab("profile"); setMobileNav(false); }}><UserRound /> Profile</button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => { setTab("settings"); setMobileNav(false); }}><Settings /> Settings</button>
         </nav>
         <div className="sidebar-footer">
           <button onClick={onPreview}><Globe2 /> View live folio <ArrowUpRight size={16} /></button>
@@ -554,6 +594,7 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
         <header>
           <button className="menu-button" onClick={() => setMobileNav(true)}><Menu /></button>
           <div className="share-link"><Globe2 size={16} /><span>livefol.io/p/{data.slug}</span><span className={`status ${data.published ? "active" : "inactive"}`}>{data.published ? "Published" : "Draft"}</span><button onClick={copyLink}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? "Copied" : "Copy"}</button></div>
+          <button className="preview-button icon-only" onClick={() => setData({ ...data, studioDark: !data.studioDark })} aria-label={data.studioDark ? "Switch to light studio" : "Switch to dark studio"} title={data.studioDark ? "Light studio" : "Dark studio"}>{data.studioDark ? <Sun size={16} /> : <Moon size={16} />}</button>
           <button className="preview-button" onClick={onPreview}><Eye size={17} /> Preview</button>
         </header>
 
@@ -570,7 +611,7 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
                 <div><span>YOUR WORK</span><h1>Projects <em>{data.projects.length}</em></h1><p>{activeCount} live projects on your public folio.</p></div>
                 <button className="accent-button" onClick={() => setEditingId("new")} disabled={editingId === "new"}><Plus size={17} /> Add project</button>
               </div>
-              <PageThemePicker value={data.portfolioTheme} onChange={(portfolioTheme) => setData({ ...data, portfolioTheme })} onPreview={onPreview} />
+              <PublicPageCard data={data} setData={setData} onPreview={onPreview} />
               <div className="project-list">
                 {editingId === "new" && (
                   <ProjectEditor key="new-project" project={null} onClose={() => setEditingId(null)} onSave={saveProject} />
@@ -589,18 +630,26 @@ function Dashboard({ data, setData, saveError, onDismissError, onPreview, onLogo
             </>
           )}
           {tab === "profile" && <ProfileEditor data={data} setData={setData} />}
-          {tab === "settings" && <SettingsPanel data={data} setData={setData} />}
         </div>
       </section>
     </main>
   );
 }
 
+function ProjectImage({ project, alt = "" }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [project.image]);
+  if (!project.image || failed) {
+    return <span className="project-placeholder"><Globe2 size={18} /><b>{hostnameOf(project.url)}</b></span>;
+  }
+  return <img src={project.image} alt={alt} onError={() => setFailed(true)} />;
+}
+
 function ProjectRow({ project, onEdit, onDelete }) {
   const [menu, setMenu] = useState(false);
   return (
     <article className="project-row">
-      <div className="project-thumb"><img src={project.image} alt="" /></div>
+      <div className="project-thumb"><ProjectImage project={project} /></div>
       <div className="project-details">
         <div className="project-line"><h3>{project.title}</h3><span className={`status ${project.status}`}>{project.status}</span></div>
         <a href={project.url} target="_blank" rel="noreferrer">{project.url.replace(/^https?:\/\//, "")} <ArrowUpRight size={13} /></a>
@@ -617,8 +666,19 @@ function ProjectRow({ project, onEdit, onDelete }) {
   );
 }
 
+const inferImageSource = (project) =>
+  project.imageSource || (!project.image || project.image.startsWith("https://image.thum.io/") ? "snapshot" : "url");
+
+const SNAPSHOT_PROBLEMS = {
+  blocked: { icon: ShieldAlert, label: "Bot check detected" },
+  blank: { icon: ShieldAlert, label: "Snapshot was blank" },
+  error: { icon: CircleAlert, label: "Site unavailable" },
+  invalid: { icon: CircleAlert, label: "Can’t capture this address" },
+  failed: { icon: CircleAlert, label: "Snapshot failed" },
+};
+
 function ProjectEditor({ project, onClose, onSave }) {
-  const [form, setForm] = useState(project || {
+  const [form, setForm] = useState(() => project ? { ...project, imageSource: inferImageSource(project) } : {
     id: Date.now(),
     title: "",
     url: "",
@@ -627,9 +687,21 @@ function ProjectEditor({ project, onClose, onSave }) {
     year: new Date().getFullYear().toString(),
     tags: ["Design", "Development"],
     image: "",
+    imageSource: "snapshot",
   });
-  const [manualImage, setManualImage] = useState(Boolean(project?.image));
+  // `url` is the address the current snapshot (or snapshot attempt) belongs to.
+  const [shot, setShot] = useState(() => ({
+    state: "idle",
+    message: "",
+    url: project?.image && inferImageSource(project) === "snapshot" ? normalizeUrl(project.url) : "",
+  }));
+  const [uploading, setUploading] = useState(false);
+  const [imageError, setImageError] = useState("");
   const editorRef = useRef(null);
+  const fileRef = useRef(null);
+  const latestShot = useRef(0);
+  const normalizedUrl = normalizeUrl(form.url);
+  const canCapture = isHttpUrl(normalizedUrl);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -637,22 +709,73 @@ function ProjectEditor({ project, onClose, onSave }) {
     editor?.querySelector("input")?.focus({ preventScroll: true });
   }, []);
 
-  const setUrl = (url) => {
-    const normalized = normalizeUrl(url);
-    setForm({
-      ...form,
-      url,
-      image: manualImage
-        ? form.image
-        : isHttpUrl(normalized)
-          ? `https://image.thum.io/get/width/1200/crop/700/noanimate/${normalized}`
-          : "",
-    });
+  const capture = async (target) => {
+    const request = ++latestShot.current;
+    setShot({ state: "loading", message: "", url: target });
+    setImageError("");
+    try {
+      const result = await api("/api/snapshots", { method: "POST", body: { url: target } });
+      if (request !== latestShot.current) return;
+      const ok = result.status === "ok";
+      setForm((current) => current.imageSource === "snapshot" ? { ...current, image: ok ? result.image : "" } : current);
+      setShot({ state: ok ? "ok" : result.status, message: result.message || "", url: target });
+    } catch (error) {
+      if (request !== latestShot.current) return;
+      setShot({ state: "failed", message: error.message, url: target });
+    }
   };
+
+  // Capture a fresh snapshot shortly after the URL stops changing.
+  useEffect(() => {
+    if (form.imageSource !== "snapshot" || !canCapture || normalizedUrl === shot.url) return undefined;
+    const timer = window.setTimeout(() => capture(normalizedUrl), 900);
+    return () => window.clearTimeout(timer);
+  }, [normalizedUrl, form.imageSource]);
+
+  const switchToSnapshot = () => {
+    setForm((current) => ({ ...current, image: "", imageSource: "snapshot" }));
+    if (canCapture) capture(normalizedUrl);
+    else setShot({ state: "idle", message: "", url: "" });
+  };
+
+  const upload = async (file) => {
+    if (!file) return;
+    setImageError("");
+    if (!UPLOAD_TYPES.includes(file.type)) {
+      setImageError("Choose a PNG, JPEG, WebP, or GIF image.");
+      return;
+    }
+    setUploading(true);
+    try {
+      const body = await prepareUpload(file);
+      if (body.size > MAX_UPLOAD_MB * 1024 * 1024) throw new Error(`Images must be under ${MAX_UPLOAD_MB} MB.`);
+      const { image } = await api("/api/images", { method: "POST", body });
+      latestShot.current += 1;
+      setShot((current) => ({ ...current, state: "idle", message: "" }));
+      setForm((current) => ({ ...current, image, imageSource: "upload" }));
+    } catch (error) {
+      setImageError(error.message);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const setImageUrl = (value) => {
+    if (!value) return switchToSnapshot();
+    latestShot.current += 1;
+    setShot((current) => ({ ...current, state: "idle", message: "" }));
+    setForm({ ...form, image: value, imageSource: "url" });
+  };
+
+  const busy = uploading || shot.state === "loading";
+  const problem = form.imageSource === "snapshot" && !form.image ? SNAPSHOT_PROBLEMS[shot.state] : null;
+  const ProblemIcon = problem?.icon;
+  const badge = { upload: "Your image", url: "Image URL", snapshot: "Snapshot ready" }[form.imageSource];
 
   const submit = (event) => {
     event.preventDefault();
-    const normalizedUrl = normalizeUrl(form.url);
+    if (busy) return;
     onSave({ ...form, url: normalizedUrl });
   };
 
@@ -664,25 +787,39 @@ function ProjectEditor({ project, onClose, onSave }) {
           <button type="button" className="icon-button" onClick={onClose} aria-label="Cancel editing" title="Cancel"><X size={15} /></button>
         </div>
         <div className="editor-body">
-          <div className="capture-preview">
-            {isHttpUrl(form.image) ? (
-              <>
-                <img src={form.image} alt="Website snapshot preview" onError={(e) => { e.currentTarget.style.display = "none"; }} />
-                <span><Check size={12} /> Snapshot ready</span>
-              </>
-            ) : (
-              <small>Add a URL and we’ll capture a snapshot automatically.</small>
-            )}
+          <div className="image-column">
+            <div className={`capture-preview ${problem ? "has-problem" : ""}`} aria-live="polite">
+              {form.image && <img key={form.image} src={form.image} alt="Project image preview" className={busy ? "dimmed" : ""} onError={(e) => { e.currentTarget.style.display = "none"; }} />}
+              {busy ? (
+                <span className="capture-status"><LoaderCircle size={14} className="spin" /> {uploading ? "Uploading…" : "Capturing snapshot…"}</span>
+              ) : form.image ? (
+                <span className="capture-badge"><Check size={12} /> {badge}</span>
+              ) : problem ? (
+                <small className="capture-problem"><ProblemIcon size={18} />{problem.label}</small>
+              ) : (
+                <small>Add a URL and we’ll capture a snapshot automatically.</small>
+              )}
+            </div>
+            <div className="image-actions">
+              <button type="button" className="icon-button" onClick={() => fileRef.current?.click()} disabled={uploading}><ImagePlus size={14} /> {form.imageSource === "upload" ? "Replace image" : "Upload image"}</button>
+              {form.imageSource === "snapshot" ? (
+                <button type="button" className="icon-button" onClick={() => capture(normalizedUrl)} disabled={!canCapture || busy} title="Capture a fresh snapshot"><RefreshCw size={14} /> Retake</button>
+              ) : (
+                <button type="button" className="icon-button" onClick={switchToSnapshot} disabled={busy}><RefreshCw size={14} /> Use snapshot</button>
+              )}
+              <input ref={fileRef} type="file" accept={UPLOAD_TYPES.join(",")} hidden onChange={(e) => upload(e.target.files?.[0])} />
+            </div>
+            {(problem || imageError) && <p className="image-note" role="alert">{imageError || shot.message}</p>}
           </div>
           <div className="editor-fields">
-            <label className="span-2">Project URL<div className="url-input"><Globe2 size={15} /><input required maxLength={2048} pattern="https?://.*|[^\s]+\.[^\s]+.*" title="Enter a valid web address, such as example.com" placeholder="yourproject.com" value={form.url} onChange={(e) => setUrl(e.target.value)} /></div></label>
+            <label className="span-2">Project URL<div className="url-input"><Globe2 size={15} /><input required maxLength={2048} pattern="https?://.*|[^\s]+\.[^\s]+.*" title="Enter a valid web address, such as example.com" placeholder="yourproject.com" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} /></div></label>
             <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">Active</option><option value="inactive">Inactive</option><option value="deprecated">Deprecated</option></select></label>
             <label>Project name<input required maxLength={80} placeholder="A wonderful thing" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
-            <label className="span-2">Custom thumbnail URL <span className="optional">(optional)</span><input maxLength={2048} pattern="https?://.*" title="Enter a complete image URL beginning with http:// or https://" placeholder="https://..." value={manualImage ? form.image : ""} onChange={(e) => { setManualImage(Boolean(e.target.value)); setForm({ ...form, image: e.target.value }); }} /></label>
+            <label className="span-2">Or use an image URL <span className="optional">(optional)</span><input maxLength={2048} pattern="https?://.*" title="Enter a complete image URL beginning with http:// or https://" placeholder="https://..." value={form.imageSource === "url" ? form.image : ""} onChange={(e) => setImageUrl(e.target.value)} /></label>
             <label className="span-3">Short description <span className="optional">{form.description.length}/180</span><textarea required maxLength={180} placeholder="What did you make, and why does it matter?" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
           </div>
         </div>
-        <div className="editor-actions"><button type="button" className="text-button" onClick={onClose}>Cancel</button><button type="submit" className="accent-button">{project ? "Save changes" : "Add project"} <ArrowRight size={15} /></button></div>
+        <div className="editor-actions"><button type="button" className="text-button" onClick={onClose}>Cancel</button><button type="submit" className="accent-button" disabled={busy}>{busy ? (uploading ? "Uploading…" : "Capturing…") : project ? "Save changes" : "Add project"} {!busy && <ArrowRight size={15} />}</button></div>
       </form>
     </article>
   );
@@ -719,63 +856,71 @@ function ProfileEditor({ data, setData }) {
   );
 }
 
-function SettingsPanel({ data, setData }) {
-  const [slug, setSlug] = useState(data.slug);
-  const [saved, setSaved] = useState(false);
+// Everything about the published page lives on the main studio screen so it's hard to miss.
+function PublicPageCard({ data, setData, onPreview }) {
+  const [form, setForm] = useState({ pageTitle: data.pageTitle || "", slug: data.slug });
+  const [status, setStatus] = useState("idle");
+  const dirty = form.pageTitle.trim() !== (data.pageTitle || "") || form.slug !== data.slug;
+
   const submit = async (event) => {
     event.preventDefault();
-    if (await setData({ ...data, slug })) return;
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 1500);
+    setStatus("saving");
+    const pageTitle = form.pageTitle.trim();
+    const error = await setData({ ...data, pageTitle, slug: form.slug });
+    if (error) return setStatus("idle");
+    setForm({ pageTitle, slug: form.slug });
+    setStatus("saved");
+    window.setTimeout(() => setStatus((current) => (current === "saved" ? "idle" : current)), 1600);
   };
 
   return (
-    <div className="panel-page">
-      <div className="dashboard-title"><div><span>THE DETAILS</span><h1>Settings</h1><p>Manage your Livefolio address and preferences.</p></div></div>
-      <form className="form-card" onSubmit={submit}>
-        <label>Your public URL<div className="slug-field"><span>livefol.io/p/</span><input required minLength={3} maxLength={60} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" title="Use at least 3 letters, numbers, or single hyphens" value={slug} onChange={(e) => setSlug(slugify(e.target.value))} /></div></label>
-        <div className="setting-row"><div><Sun /><span><b>Dark studio</b><small>Use a darker workspace while editing.</small></span></div><button type="button" aria-label="Toggle dark studio" className={`toggle ${data.studioDark ? "on" : ""}`} onClick={() => setData({ ...data, studioDark: !data.studioDark })}><span /></button></div>
-        <div className="setting-row"><div><Globe2 /><span><b>Public portfolio</b><small>{data.published ? "Your page is visible to anyone with the link." : "Only you can preview this page."}</small></span></div><button type="button" aria-label="Toggle public portfolio" className={`toggle ${data.published ? "on" : ""}`} onClick={() => setData({ ...data, published: !data.published })}><span /></button></div>
-        <div className="settings-actions"><span className={`status ${data.published ? "active" : "inactive"}`}>{data.published ? "Published" : "Draft"}</span><button className="accent-button" type="submit">{saved ? <Check size={18} /> : null}{saved ? "Saved" : "Save settings"}</button></div>
-      </form>
-    </div>
-  );
-}
-
-function PageThemePicker({ value, onChange, onPreview }) {
-  const selected = pageThemes[value] ? value : "midnight";
-  return (
-    <section className="form-card page-theme-card">
+    <section className="form-card public-page-card">
       <div className="page-theme-head">
-        <div><Palette size={18} /><span><b>Public page theme</b><small>Choose the colors visitors see on your published portfolio.</small></span></div>
-        <button type="button" className="text-button" onClick={onPreview}><Eye size={15} /> Preview</button>
+        <div><Globe2 size={18} /><span><b>Your public page</b><small>{data.published ? "Published — anyone with the link can see it." : "Draft — only you can preview it."}</small></span></div>
+        <div className="public-page-actions">
+          <span className={`status ${data.published ? "active" : "inactive"}`}>{data.published ? "Published" : "Draft"}</span>
+          <button type="button" role="switch" aria-checked={data.published} aria-label="Publish portfolio" title={data.published ? "Unpublish" : "Publish"} className={`toggle ${data.published ? "on" : ""}`} onClick={() => setData({ ...data, published: !data.published })}><span /></button>
+          <button type="button" className="text-button" onClick={onPreview}><Eye size={15} /> Preview</button>
+        </div>
       </div>
-      <div className="page-theme-grid" role="radiogroup" aria-label="Public page theme">
-        {Object.entries(pageThemes).map(([key, theme]) => (
-          <button
-            type="button"
-            key={key}
-            role="radio"
-            aria-checked={selected === key}
-            className={`page-theme-option ${selected === key ? "selected" : ""}`}
-            onClick={() => onChange(key)}
-          >
-            <span className="page-theme-preview" style={pageThemeStyle(theme)}>
-              <i className="ptp-title" />
-              <i className="ptp-rule" />
-              <span className="ptp-cards"><i /><i /><i /></span>
-            </span>
-            <span className="page-theme-label">
-              <span><b>{theme.name}</b><small>{theme.hint}</small></span>
-              {selected === key && <Check size={14} />}
-            </span>
-          </button>
-        ))}
-      </div>
+      <form className="public-page-form" onSubmit={submit}>
+        <label>Page title<input maxLength={80} placeholder={defaultPageTitle(data)} value={form.pageTitle} onChange={(e) => setForm({ ...form, pageTitle: e.target.value })} /></label>
+        <label>Public URL<div className="slug-field"><span>livefol.io/p/</span><input required minLength={3} maxLength={60} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" title="Use at least 3 letters, numbers, or single hyphens" value={form.slug} onChange={(e) => setForm({ ...form, slug: slugify(e.target.value) })} /></div></label>
+        <button className="accent-button" type="submit" disabled={!dirty || status === "saving"}>{status === "saved" ? <><Check size={16} /> Saved</> : status === "saving" ? "Saving…" : "Save"}</button>
+      </form>
+      <div className="page-theme-subhead"><Palette size={14} /> Theme</div>
+      <PageThemePicker value={data.portfolioTheme} onChange={(portfolioTheme) => setData({ ...data, portfolioTheme })} />
     </section>
   );
 }
 
+function PageThemePicker({ value, onChange }) {
+  const selected = pageThemes[value] ? value : "midnight";
+  return (
+    <div className="page-theme-grid" role="radiogroup" aria-label="Public page theme">
+      {Object.entries(pageThemes).map(([key, theme]) => (
+        <button
+          type="button"
+          key={key}
+          role="radio"
+          aria-checked={selected === key}
+          className={`page-theme-option ${selected === key ? "selected" : ""}`}
+          onClick={() => onChange(key)}
+        >
+          <span className="page-theme-preview" style={pageThemeStyle(theme)}>
+            <i className="ptp-title" />
+            <i className="ptp-rule" />
+            <span className="ptp-cards"><i /><i /><i /></span>
+          </span>
+          <span className="page-theme-label">
+            <span><b>{theme.name}</b><small>{theme.hint}</small></span>
+            {selected === key && <Check size={14} />}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
 // Owners see their own (possibly unpublished) page; everyone else gets the published copy.
 function PortfolioPage({ slug, ownData, onBack }) {
   const own = ownData && ownData.slug === slug ? ownData : null;
@@ -817,14 +962,23 @@ function PortfolioPage({ slug, ownData, onBack }) {
 
 function Portfolio({ data, onBack }) {
   const visibleProjects = data.projects.filter((project) => project.status !== "inactive");
-  const portfolioTitle = `${data.name.split(" ")[0]}'s projects`;
+  const portfolioTitle = data.pageTitle?.trim() || defaultPageTitle(data);
   const themeStyle = pageThemeStyle(getPageTheme(data.portfolioTheme));
+
+  useEffect(() => {
+    if (!data.published) return undefined;
+    const previous = document.title;
+    document.title = `${portfolioTitle} · Livefolio`;
+    return () => {
+      document.title = previous;
+    };
+  }, [portfolioTitle, data.published]);
 
   if (!data.published) {
     return (
       <main className="portfolio unpublished-portfolio" style={themeStyle}>
         <button className="simple-back" onClick={onBack}><ArrowLeft size={15} /> Back to studio</button>
-        <div><span>Draft portfolio</span><h1>This page isn’t published yet.</h1><p>Publish it from Settings when it’s ready to share.</p></div>
+        <div><span>Draft portfolio</span><h1>This page isn’t published yet.</h1><p>Turn on Publish in “Your public page” on the studio’s Projects screen when it’s ready to share.</p></div>
       </main>
     );
   }
@@ -837,9 +991,11 @@ function Portfolio({ data, onBack }) {
       </header>
 
       <section className="simple-portfolio-intro">
-        <h1>{portfolioTitle}</h1>
+        <h1 className={portfolioTitle.length > 26 ? "long-title" : ""}>{portfolioTitle}</h1>
         <div className="title-rule" />
-        <p>{data.role} <span>•</span> {visibleProjects.length} live projects <span>•</span> {data.location}</p>
+        <p>{[data.role, `${visibleProjects.length} live projects`, data.location].filter(Boolean).map((part, index) => (
+          <React.Fragment key={part}>{index > 0 && <> <span>•</span> </>}{part}</React.Fragment>
+        ))}</p>
       </section>
 
       <section className="work-section">
@@ -847,7 +1003,7 @@ function Portfolio({ data, onBack }) {
           {visibleProjects.map((project) => (
             <a className="portfolio-card" href={project.url} target="_blank" rel="noreferrer" key={project.id}>
               <div className="portfolio-image">
-                <img src={project.image} alt={`${project.title} website preview`} />
+                <ProjectImage project={project} alt={`${project.title} website preview`} />
                 <span className="project-icon"><Globe2 size={17} /></span>
                 {project.status === "deprecated" && <span className="deprecated-badge">Deprecated</span>}
               </div>

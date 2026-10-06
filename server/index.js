@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi } from "./api.js";
+import { closeSnapshotBrowser } from "./snapshot.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.resolve(process.env.DIST_DIR || path.join(root, "dist"));
@@ -97,6 +98,8 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, () => console.log(`Livefolio listening on port ${port}`));
 
-const shutdown = () => server.close(() => process.exit(0));
+const shutdown = () => {
+  closeSnapshotBrowser().finally(() => server.close(() => process.exit(0)));
+};
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

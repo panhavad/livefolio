@@ -7,11 +7,13 @@ Node.js server for accounts and storage.
 
 - Accounts with server-side password checks and secure session cookies
 - Editable public profile and introduction
-- Project cards with automatic website snapshots from submitted URLs
+- Project cards with automatic website snapshots that skip bot-check pages
+- Upload or replace a custom image for any project
 - Active, inactive, and deprecated project states
 - Shareable public portfolio URLs at `/p/your-name`
-- Eight color themes for the public portfolio page (Midnight, Paper, Ocean, Sky,
-  Forest, Sand, Plum, and Rose), chosen on the studio's Projects page
+- A "Your public page" card on the studio's main Projects screen for the page
+  title, public URL, publish switch, and theme. There are eight themes:
+  Midnight, Paper, Ocean, Sky, Forest, Sand, Plum, and Rose.
 - Responsive dashboard and public portfolio
 - Portfolios saved on the server, so they work across devices and public links
   work for every visitor
@@ -23,8 +25,10 @@ npm install
 npm run dev
 ```
 
-`npm run dev` serves the API too. Local accounts and portfolios are stored in
-`.data/` (ignored by Git).
+`npm run dev` serves the API too. Local accounts, portfolios, and images are
+stored in `.data/` (ignored by Git). Website snapshots use a locally installed
+Chrome, Chromium, or Edge (found automatically, or set `CHROME_PATH`). Without
+one, snapshots are unavailable but image uploads still work.
 
 For a production build:
 
@@ -42,13 +46,39 @@ npm start   # serves dist/ and the API on http://localhost:8080
   and repeated failures are rate limited.
 - Only the owner can change a portfolio. Visitors can see it only once it is
   published, and inactive projects stay hidden.
-- Everything is stored in `db.json` inside `DATA_DIR` (`/data` in Docker, kept
-  in the `livefolio-data` volume so it survives redeploys). Back it up with:
+- Everything is stored in `DATA_DIR` (`/data` in Docker, kept in the
+  `livefolio-data` volume so it survives redeploys): `db.json` plus project
+  images in `images/`. Back it up with:
 
   ```bash
-  docker cp livefolio:/data/db.json ./livefolio-backup.json
+  docker cp livefolio:/data ./livefolio-backup
   ```
 
+## Project images and snapshots
+
+When you add a project URL, the server opens the page in a headless Chromium
+browser, checks it, and stores a screenshot on the server. Before keeping a
+snapshot, it makes sure the page isn't a bot check:
+
+- **Skipped pages:** interstitials and overlays from Cloudflare, DataDome,
+  PerimeterX, Imperva, AWS WAF, DDoS-Guard, hCaptcha, and reCAPTCHA. Pages that
+  return 401, 403, or 429 and screenshots that come back blank are skipped too.
+- **Same render:** the check and the screenshot come from the same page load.
+  A second check right after the screenshot discards it if a challenge pops up
+  mid-capture.
+- **Self-clearing checks:** a short "Just a moment…" check that clears on its
+  own gets a few seconds to finish, and then the real page is captured.
+
+When a snapshot is skipped, the editor explains why. You can upload your own
+image (PNG, JPEG, WebP, or GIF, up to 5 MB) or paste an image URL. Use
+**Replace image** or **Use snapshot** to change it later. Uploaded photos are
+resized and re-encoded in the browser, which also strips location metadata.
+Projects without an image show a tidy placeholder with the site's domain.
+
+The snapshot browser only reaches public websites. All of its traffic goes
+through a built-in proxy that refuses private, loopback, link-local, and cloud
+metadata addresses, including after redirects. Unused images are cleaned up a
+few hours after they're replaced.
 ## Versioning
 
 The app shows its version in the landing page footer and at the bottom of the
@@ -83,8 +113,10 @@ docker compose up -d --build
 The site is available at `http://localhost:8080`. Change the host port by
 copying `.env.example` to `.env` and setting `LIVEFOLIO_PORT`.
 
-The container uses a multi-stage build. A Node.js server (built-in modules only)
-serves the production bundle and the `/api` routes. Client-side routes such as
+The container uses a multi-stage build. A Node.js server serves the production
+bundle and the `/api` routes. The runtime image includes Chromium and fonts for
+snapshots, which run with `--no-sandbox` because containers can't create
+Chromium's sandbox; the container itself is the isolation boundary. Client-side routes such as
 `/p/maya-chen` are routed back to the app, and Docker checks `/health` to
 confirm the service is healthy.
 

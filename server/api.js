@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { promisify } from "node:util";
+import { captureSnapshot, detectImageType, SnapshotError } from "./snapshot.js";
 import { createStore } from "./store.js";
 
 const scryptAsync = promisify(scrypt);
@@ -7,15 +9,24 @@ const scryptAsync = promisify(scrypt);
 const SESSION_COOKIE = "livefolio_session";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 1_000_000;
+const MAX_IMAGE_BYTES = 5_000_000;
+const MAX_IMAGES_PER_USER = 400;
+// Unsaved uploads and snapshots stay around this long before cleanup removes them.
+const IMAGE_GRACE_MS = 6 * 60 * 60 * 1000;
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 200;
 const LOGIN_LIMIT = { max: 10, windowMs: 15 * 60 * 1000 };
 const SIGNUP_LIMIT = { max: 20, windowMs: 60 * 60 * 1000 };
+const SNAPSHOT_LIMIT = { max: 40, windowMs: 15 * 60 * 1000 };
+const UPLOAD_LIMIT = { max: 60, windowMs: 60 * 60 * 1000 };
 
 // "maya-chen" is the built-in demo portfolio linked from the landing page.
 const RESERVED_SLUGS = new Set(["maya-chen", "api", "admin", "studio", "assets", "health"]);
 const THEMES = new Set(["midnight", "paper", "ocean", "sky", "forest", "sand", "plum", "rose"]);
 const STATUSES = new Set(["active", "inactive", "deprecated"]);
+const IMAGE_SOURCES = new Set(["snapshot", "upload", "url"]);
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+const IMAGE_PATH_RE = /^\/api\/images\/([A-Za-z0-9_-]{22})\.(png|jpg|webp|gif)$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -104,7 +115,19 @@ function email(value, label, { required = false } = {}) {
   return address;
 }
 
-function sanitizeProject(project, index) {
+// Project images are either an external http(s) URL or one of the owner's stored images.
+function projectImage(value, label, ownsImage) {
+  const raw = text(value, 2048, label);
+  if (!raw) return "";
+  const stored = IMAGE_PATH_RE.exec(raw);
+  if (stored) {
+    if (!ownsImage(stored[1])) throw new HttpError(400, `${label} is no longer available. Upload it again.`);
+    return raw;
+  }
+  return httpUrl(raw, label);
+}
+
+function sanitizeProject(project, index, ownsImage) {
   if (!project || typeof project !== "object") throw new HttpError(400, "Invalid project.");
   const label = `Project ${index + 1}`;
   const id = (typeof project.id === "number" && Number.isFinite(project.id)) ||
@@ -114,6 +137,7 @@ function sanitizeProject(project, index) {
   const tags = Array.isArray(project.tags)
     ? project.tags.slice(0, 10).map((tag) => text(tag, 40, `${label} tag`)).filter(Boolean)
     : [];
+  const image = projectImage(project.image, `${label} image`, ownsImage);
   return {
     id,
     title: text(project.title, 80, `${label} name`, { required: true }),
@@ -122,11 +146,13 @@ function sanitizeProject(project, index) {
     status: STATUSES.has(project.status) ? project.status : "active",
     year: text(project.year, 10, `${label} year`),
     tags,
-    image: httpUrl(project.image, `${label} thumbnail`),
+    image,
+    imageSource: IMAGE_SOURCES.has(project.imageSource) ? project.imageSource
+      : !image || /^https:\/\/image\.thum\.io\//.test(image) ? "snapshot" : "url",
   };
 }
 
-function sanitizeData(input) {
+function sanitizeData(input, ownsImage) {
   if (!input || typeof input !== "object") throw new HttpError(400, "Invalid portfolio data.");
   const slug = text(input.slug, 60, "Public URL", { required: true }).toLowerCase();
   if (slug.length < 3 || !SLUG_RE.test(slug)) {
@@ -141,10 +167,11 @@ function sanitizeData(input) {
     location: text(input.location, 100, "Location"),
     email: email(input.email, "Contact email"),
     slug,
+    pageTitle: text(input.pageTitle, 80, "Page title"),
     published: Boolean(input.published),
     studioDark: Boolean(input.studioDark),
     portfolioTheme: THEMES.has(input.portfolioTheme) ? input.portfolioTheme : "midnight",
-    projects: input.projects.map(sanitizeProject),
+    projects: input.projects.map((project, index) => sanitizeProject(project, index, ownsImage)),
   };
 }
 
@@ -155,6 +182,7 @@ const publicPortfolio = (data) => ({
   location: data.location,
   email: data.email,
   slug: data.slug,
+  pageTitle: data.pageTitle || "",
   published: true,
   portfolioTheme: data.portfolioTheme,
   projects: data.projects.filter((project) => project.status !== "inactive"),
@@ -169,28 +197,41 @@ function parseCookies(header = "") {
   return cookies;
 }
 
-function readJson(req) {
+// Bodies a little over the limit are drained so the client gets a clean 413;
+// anything far larger is cut off.
+function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
+    const declared = Number(req.headers["content-length"] || 0);
+    if (declared > maxBytes * 4) {
+      reject(new HttpError(413, "Request is too large."));
+      req.resume();
+      return;
+    }
     let size = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on("data", (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new HttpError(413, "Request is too large."));
-        req.destroy();
+      if (size > maxBytes) {
+        tooLarge = true;
+        chunks.length = 0;
+        if (size > maxBytes * 4) req.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => {
-      try {
-        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {});
-      } catch {
-        reject(new HttpError(400, "Invalid JSON body."));
-      }
-    });
+    req.on("end", () => (tooLarge ? reject(new HttpError(413, "Request is too large.")) : resolve(Buffer.concat(chunks))));
     req.on("error", reject);
   });
+}
+
+async function readJson(req) {
+  const body = await readBody(req, MAX_BODY_BYTES);
+  try {
+    return body.length ? JSON.parse(body.toString("utf8")) : {};
+  } catch {
+    throw new HttpError(400, "Invalid JSON body.");
+  }
 }
 
 function send(res, status, body, headers = {}) {
@@ -217,11 +258,13 @@ function sessionCookie(req, token, maxAgeSeconds) {
   ].filter(Boolean).join("; ");
 }
 
-// Blocks cross-site form posts: mutations must be JSON and, when the browser
+// Blocks cross-site form posts: mutations must be JSON (or a raw image upload, which
+// browsers can't send cross-site without a CORS preflight) and, when the browser
 // reports an Origin, it must match the host being called.
-function assertSameOrigin(req) {
+function assertSameOrigin(req, { allowImages = false } = {}) {
   const contentType = String(req.headers["content-type"] || "");
-  if (!contentType.startsWith("application/json")) throw new HttpError(415, "Expected a JSON request.");
+  const allowed = contentType.startsWith("application/json") || (allowImages && /^image\/(png|jpeg|webp|gif)\b/.test(contentType));
+  if (!allowed) throw new HttpError(415, allowImages ? "Upload a PNG, JPEG, WebP, or GIF image." : "Expected a JSON request.");
   const origin = req.headers.origin;
   if (origin) {
     let originHost;
@@ -239,6 +282,8 @@ export function createApi({ dataDir }) {
   const store = createStore(dataDir);
   const loginLimiter = createRateLimiter(LOGIN_LIMIT);
   const signupLimiter = createRateLimiter(SIGNUP_LIMIT);
+  const snapshotLimiter = createRateLimiter(SNAPSHOT_LIMIT);
+  const uploadLimiter = createRateLimiter(UPLOAD_LIMIT);
   let dummyHash;
 
   const findUserByEmail = (db, address) => Object.values(db.users).find((user) => user.email === address);
@@ -308,6 +353,7 @@ export function createApi({ dataDir }) {
         location: "",
         email: address,
         slug: uniqueSlug(db, name),
+        pageTitle: "",
         published: false,
         studioDark: false,
         portfolioTheme: "midnight",
@@ -356,15 +402,107 @@ export function createApi({ dataDir }) {
     send(res, 200, { ok: true }, { "Set-Cookie": sessionCookie(req, "", 0) });
   }
 
-  async function savePortfolio(req, res, db) {
+  function requireSession(db, req) {
     const session = getSession(db, req);
     if (!session) throw new HttpError(401, "Your session has expired. Please log in again.");
+    return session;
+  }
+
+  const ownsImage = (db, userId) => (id) => db.images[id]?.userId === userId;
+
+  const referencedImages = (data) => new Set(
+    data.projects.map((project) => IMAGE_PATH_RE.exec(project.image || "")?.[1]).filter(Boolean),
+  );
+
+  // Removes the user's stored images that no saved project uses (after a grace
+  // period, so images in an unsaved editor survive).
+  async function pruneImages(db, user) {
+    const keep = referencedImages(user.data);
+    const cutoff = Date.now() - IMAGE_GRACE_MS;
+    const removed = [];
+    for (const [id, image] of Object.entries(db.images)) {
+      if (image.userId === user.id && !keep.has(id) && image.createdAt < cutoff) {
+        delete db.images[id];
+        removed.push(store.deleteImage(`${id}.${image.type}`));
+      }
+    }
+    await Promise.all(removed);
+    return removed.length;
+  }
+
+  async function storeImage(db, user, buffer, type, source) {
+    await pruneImages(db, user);
+    const count = Object.values(db.images).filter((image) => image.userId === user.id).length;
+    if (count >= MAX_IMAGES_PER_USER) throw new HttpError(429, "You’ve reached the image limit. Remove unused projects and try again.");
+    const id = randomBytes(16).toString("base64url");
+    await store.writeImage(`${id}.${type}`, buffer);
+    db.images[id] = { userId: user.id, type, source, size: buffer.length, createdAt: Date.now() };
+    await store.persist();
+    return `/api/images/${id}.${type}`;
+  }
+
+  async function savePortfolio(req, res, db) {
+    const session = requireSession(db, req);
     const body = await readJson(req);
-    const data = sanitizeData(body.data);
+    const data = sanitizeData(body.data, ownsImage(db, session.user.id));
     if (slugTaken(db, data.slug, session.user.id)) throw new HttpError(409, "That public URL is already taken.");
     session.user.data = data;
+    await pruneImages(db, session.user);
     await store.persist();
     send(res, 200, { data });
+  }
+
+  async function takeSnapshot(req, res, db) {
+    const { user } = requireSession(db, req);
+    snapshotLimiter.check(user.id);
+    const body = await readJson(req);
+    const target = httpUrl(body.url, "Project URL", { required: true });
+    snapshotLimiter.hit(user.id);
+    let shot;
+    try {
+      shot = await captureSnapshot(target);
+    } catch (error) {
+      if (error instanceof SnapshotError) return send(res, 200, { status: error.status, message: error.message });
+      throw error;
+    }
+    const image = await storeImage(db, user, shot.buffer, shot.type, "snapshot");
+    send(res, 200, { status: "ok", image });
+  }
+
+  async function uploadImage(req, res, db) {
+    const { user } = requireSession(db, req);
+    uploadLimiter.check(user.id);
+    const buffer = await readBody(req, MAX_IMAGE_BYTES);
+    const type = detectImageType(buffer);
+    if (!type) throw new HttpError(415, "Upload a PNG, JPEG, WebP, or GIF image.");
+    uploadLimiter.hit(user.id);
+    const image = await storeImage(db, user, buffer, type, "upload");
+    send(res, 201, { image });
+  }
+
+  function serveImage(req, res, db, id, type) {
+    const image = db.images[id];
+    if (!image || image.type !== type) throw new HttpError(404, "Image not found.");
+    const stream = createReadStream(store.imagePath(`${id}.${type}`));
+    stream.on("open", () => {
+      res.writeHead(200, {
+        "Content-Type": IMAGE_TYPES[type],
+        "Content-Length": image.size,
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+      });
+      if (req.method === "HEAD") {
+        stream.destroy();
+        res.end();
+      } else {
+        stream.pipe(res);
+      }
+    });
+    stream.on("error", () => {
+      if (!res.headersSent) send(res, 404, { error: "Image not found." });
+      else res.destroy();
+    });
   }
 
   return async function handleApi(req, res) {
@@ -373,7 +511,7 @@ export function createApi({ dataDir }) {
       const db = await store.load();
       const method = req.method;
 
-      if (method !== "GET" && method !== "HEAD") assertSameOrigin(req);
+      if (method !== "GET" && method !== "HEAD") assertSameOrigin(req, { allowImages: pathname === "/api/images" });
 
       if (pathname === "/api/auth/session" && method === "GET") {
         const session = getSession(db, req);
@@ -383,6 +521,11 @@ export function createApi({ dataDir }) {
       if (pathname === "/api/auth/login" && method === "POST") return await login(req, res, db);
       if (pathname === "/api/auth/logout" && method === "POST") return await logout(req, res, db);
       if (pathname === "/api/portfolio" && method === "PUT") return await savePortfolio(req, res, db);
+      if (pathname === "/api/snapshots" && method === "POST") return await takeSnapshot(req, res, db);
+      if (pathname === "/api/images" && method === "POST") return await uploadImage(req, res, db);
+
+      const image = IMAGE_PATH_RE.exec(pathname);
+      if (image && (method === "GET" || method === "HEAD")) return serveImage(req, res, db, image[1], image[2]);
 
       const match = pathname.match(/^\/api\/portfolios\/([a-z0-9-]{1,60})$/);
       if (match && method === "GET") {
